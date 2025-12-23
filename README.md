@@ -237,6 +237,10 @@ To use the LipScore evaluation, you'll need to install the following dependencie
 
 Once installed, you can use the LipScore class in `evaluation/lipscore.py` to evaluate your generated animations:
 
+## Known issue
+
+The current approach uses different audio models for the keyframe and interpolation models. If you’re retraining and plan to use the same audio model for both, you may need to update this section of the inference code:
+https://github.com/antonibigata/keysync/blob/f7827b041d9d30740a96998f0f9946ae19b2d248/scripts/sampling/dubbing_pipeline.py#L500-L503
 
 ## Citation
 
