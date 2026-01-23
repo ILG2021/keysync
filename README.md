@@ -142,7 +142,7 @@ The simplest way to run inference on your own data is using the `infer_raw.sh` s
 
 ```bash
 bash scripts/infer_raw.sh \
-  --filelist "data/videos" \
+  --file_list "data/videos" \
   --file_list_audio "data/audios" \
   --output_folder "my_animations" \
   --keyframes_ckpt "path/to/keyframe_dub.pt" \
