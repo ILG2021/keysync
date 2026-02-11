@@ -1,11 +1,10 @@
-from torchvision.io import read_video
 import argparse
 import os
 import sys
-from torchvision.io import write_video
-from einops import rearrange
 import numpy as np
 from tqdm import tqdm
+import cv2
+import torch
 
 # Add the current directory to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,41 +22,70 @@ def main(input_video_dir, output_video_dir, input_landmarks_dir, output_landmark
     if not os.path.exists(output_video_dir):
         os.makedirs(output_video_dir)
     
-    
-
     video_files = [f for f in os.listdir(input_video_dir) if f.endswith('.mp4')]
-
     video_preprocessor = VideoPreProcessor()
     
-    for video_file in tqdm(video_files, desc="Processing videos", total=len(video_files)):
+    for video_file in tqdm(video_files, desc="Processing videos"):
         input_video_path = os.path.join(input_video_dir, video_file)
         output_video_path = os.path.join(output_video_dir, video_file)
-
         video_parent_dir = os.path.dirname(input_video_path).split("/")[-1]
         
-        # Read the video
-        video, _, info = read_video(input_video_path, output_format="TCHW")
+        # Open video and get properties
+        cap = cv2.VideoCapture(input_video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        landmarks = np.load(input_video_path.replace('.mp4', '.npy').replace(video_parent_dir, input_landmarks_dir))
+        landmarks_path = input_video_path.replace('.mp4', '.npy').replace(video_parent_dir, input_landmarks_dir)
+        if not os.path.exists(landmarks_path):
+            print(f"Skipping {video_file} because landmarks not found at {landmarks_path}")
+            cap.release()
+            continue
+            
+        landmarks = np.load(landmarks_path)
+        if len(landmarks.shape) == 2:
+            landmarks = landmarks[None, ...]
+            
+        # Calculate crop data for all frames
+        crop_data_container = video_preprocessor.get_crop_data(landmarks[:, :, :2], height, width)
         
-        video_preprocessor_output = video_preprocessor(video, landmarks)
-        cropped_video = video_preprocessor_output.video
-        landmarks = video_preprocessor_output.landmarks
+        # Internal VideoWriter
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_video_path, fourcc, fps, (video_preprocessor.resize_size, video_preprocessor.resize_size))
         
-        # Save the processed video
-        write_video(
-            output_video_path,
-            rearrange(cropped_video, "t c h w -> t h w c"),
-            fps=info["video_fps"],
-            video_codec="libx264",
-        )
+        processed_landmarks = []
+        
+        for i in range(total_frames):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if i >= len(landmarks) or i >= len(crop_data_container):
+                break
+
+            # Convert BGR to RGB and then to torch tensor [C, H, W]
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1)
+            
+            cropped_frame, new_lmk, _, _ = video_preprocessor.crop_single_frame(
+                frame_tensor, landmarks[i, :, :2], crop_data_container[i]
+            )
+            
+            # Convert back to uint8 BGR for OpenCV writer
+            res_frame = cropped_frame.permute(1, 2, 0).byte().numpy()
+            res_frame_bgr = cv2.cvtColor(res_frame, cv2.COLOR_RGB2BGR)
+            out.write(res_frame_bgr)
+            
+            processed_landmarks.append(new_lmk)
+        
+        cap.release()
+        out.release()
         
         # Process landmarks
         output_landmarks_path = input_video_path.replace('.mp4', '.npy').replace(video_parent_dir, output_landmarks_dir)
-
         os.makedirs(os.path.dirname(output_landmarks_path), exist_ok=True)
-        
-        np.save(output_landmarks_path, landmarks)
+        np.save(output_landmarks_path, np.stack(processed_landmarks))
 
 
 if __name__ == "__main__":

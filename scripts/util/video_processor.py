@@ -67,11 +67,8 @@ class VideoPreProcessor:
         new_frames = []
         landmarks_container = []
         shape_container = []
-        crop_data_container = self._extract_crop_data(landmarks, video)
-        crop_data_container = self._smooth_crop_data(crop_data_container)
-        crop_data_container = self._refine_crop_data(
-            crop_data_container, video.shape[2], video.shape[3]
-        )
+        height, width = video.shape[2:]
+        crop_data_container = self.get_crop_data(landmarks, height, width)
         for frame, lmk, crop_data in zip(
             video, landmarks, crop_data_container
         ):
@@ -91,13 +88,27 @@ class VideoPreProcessor:
             shape=np.stack(shape_container),
         )
 
+    def get_crop_data(
+        self,
+        landmarks: jt.Float[np.ndarray, "t 68 2"],
+        height: int,
+        width: int,
+    ) -> CropDataContainer:
+        crop_data_container = self._extract_crop_data(landmarks, height, width)
+        crop_data_container = self._smooth_crop_data(crop_data_container)
+        crop_data_container = self._refine_crop_data(
+            crop_data_container, height, width
+        )
+        return crop_data_container
+
     def _extract_crop_data(
         self,
         landmarks: jt.Float[np.ndarray, "t 68 2"],
-        frames: jt.Float[torch.Tensor, "t c h w"],
+        height: int,
+        width: int,
     ) -> CropDataContainer:
         crop_data_container = []
-        for lmk, frame in zip(landmarks, frames):
+        for lmk in landmarks:
             min_x, min_y = np.min(lmk, axis=0)
             max_x, max_y = np.max(lmk, axis=0)
 
@@ -117,8 +128,8 @@ class VideoPreProcessor:
 
             min_x, min_y = max(min_x, 0), max(min_y, 0)
             max_x, max_y = (
-                min(max_x, frame.shape[2]),
-                min(max_y, frame.shape[1]),
+                min(max_x, width),
+                min(max_y, height),
             )
             crop_data = CropData(
                 x_start=min_x,
@@ -129,6 +140,19 @@ class VideoPreProcessor:
             crop_data_container.append(crop_data)
 
         return crop_data_container
+
+    def crop_single_frame(
+        self,
+        frame: jt.Float[torch.Tensor, "c h w"],
+        lmk: jt.Float[np.ndarray, "68 2"],
+        crop_data: CropData,
+    ) -> Tuple[
+        jt.Float[torch.Tensor, "c h_out w_out"],
+        jt.Float[np.ndarray, "68 2"],
+        int,
+        int,
+    ]:
+        return self._crop_face(frame, lmk, crop_data)
 
     def _get_crop(
         self,

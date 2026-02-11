@@ -91,9 +91,9 @@ python -m pip install -r requirements.txt --no-deps
 python -m pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
 
 # OPTIONAL
-git clone https://github.com/facebookresearch/sam2.git && cd sam2
+git clone https://github.com/facebookresearch/sam2.git
 
-pip install -e . --no-deps
+pip install -e sam2 --no-deps
 ```
 
 ### Known Issues
