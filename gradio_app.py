@@ -264,4 +264,4 @@ with gr.Blocks(theme=gr.themes.Soft(), title="KeySync AI WebUI") as demo:
             refresh_logs_btn.click(get_training_logs, outputs=[train_logs])
 
 if __name__ == "__main__":
-    demo.queue().launch(inbrowser=True)
+    demo.queue().launch(inbrowser=True,share=True)
