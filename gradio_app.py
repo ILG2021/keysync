@@ -35,7 +35,7 @@ def get_checkpoints():
     ckpt_dir = os.path.join(ROOT_DIR, "pretrained_models", "checkpoints")
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir, exist_ok=True)
-    return [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt") or f.endswith(".safetensors")]
+    return [f for f in os.listdir(ckpt_dir) ]
 
 def preprocess_video(video_path):
     """Generate landmarks and latents if missing."""
