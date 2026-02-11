@@ -13,6 +13,8 @@ from omegaconf import OmegaConf
 from torchvision.io import read_video
 import torchaudio
 from safetensors.torch import load_file as load_safetensors
+import cv2
+from scripts.util.video_processor import VideoPreProcessor
 
 # Add the current directory to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -859,6 +861,55 @@ def sample_interpolation(
     return vid
 
 
+def paste_back(processed_video, original_video, crop_data):
+    """
+    Stitches the processed 512x512 face/crop back into the original video frames.
+    processed_video: numpy array [T, C, H, W] in [0, 255] (uint8)
+    original_video: torch tensor [T, C, H, W] in [0, 255] (uint8)
+    crop_data: List of CropData objects
+    """
+    T = processed_video.shape[0]
+    # Convert to T, H, W, C for processing
+    p_vid = np.transpose(processed_video, (0, 2, 3, 1))
+    o_vid = rearrange(original_video[:T], "t c h w -> t h w c").cpu().numpy()
+    
+    out_video = o_vid.copy()
+    
+    # Create a soft mask for blending
+    mask = np.ones((512, 512, 1), dtype=np.float32)
+    border = 25
+    for i in range(border):
+        alpha = i / border
+        mask[i, :] *= alpha
+        mask[511-i, :] *= alpha
+        mask[:, i] *= alpha
+        mask[:, 511-i] *= alpha
+        
+    for i in range(T):
+        data = crop_data[i]
+        x1, y1, x2, y2 = data.x_start, data.y_start, data.x_end, data.y_end
+        target_w = x2 - x1
+        target_h = y2 - y1
+        
+        if target_w <= 0 or target_h <= 0:
+            continue
+            
+        # Resize processed 512x512 crop and the mask back to the original box size
+        p_frame = cv2.resize(p_vid[i], (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+        m_frame = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        if len(m_frame.shape) == 2:
+            m_frame = m_frame[:, :, None]
+        
+        # Blend processed crop with original frame
+        orig_region = out_video[i, y1:y2, x1:x2].astype(np.float32)
+        blended = p_frame.astype(np.float32) * m_frame + orig_region * (1.0 - m_frame)
+        out_video[i, y1:y2, x1:x2] = blended.astype(np.uint8)
+        
+    # Convert back to T, C, H, W
+    out_video = np.transpose(out_video, (0, 3, 1, 2))
+    return out_video
+
+
 def sample(
     model: Any,
     model_keyframes: Any,
@@ -901,6 +952,7 @@ def sample(
     nose_index: int = 28,
     save_occlusion_mask: bool = False,
     recompute: bool = False,
+    paste_back_to_body: bool = False,
 ) -> None:
     """
     Simple script to generate a single sample conditioned on an image `video_path` or multiple images, one for each
@@ -946,12 +998,30 @@ def sample(
 
     torch.manual_seed(seed)
 
-    video = read_video(video_path, output_format="TCHW")[0]
+    original_video = read_video(video_path, output_format="TCHW")[0]
+    h, w = original_video.shape[2:]
+    original_len = original_video.shape[0]
 
-    video = (video / 255.0) * 2.0 - 1.0
-    h, w = video.shape[2:]
-    original_len = video.shape[0]
-    video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
+    landmarks_path = video_path
+    if landmark_folder is not None:
+        landmarks_path = landmarks_path.replace(video_folder, landmark_folder)
+    landmarks = np.load(
+        landmarks_path.replace(".mp4", ".npy"),
+        allow_pickle=True,
+    )
+    
+    crop_data = None
+    if paste_back_to_body:
+        preprocessor = VideoPreProcessor(crop_type="union", resize_size=512)
+        # VideoPreProcessor expects [T, C, H, W] uint8
+        proc_out = preprocessor(landmarks[:, :, :2], original_video)
+        video = (proc_out.video / 255.0) * 2.0 - 1.0
+        crop_data = proc_out.crop_data
+        print(f"Using VideoPreProcessor for full body support. Cropped to 512x512.")
+    else:
+        video = (original_video / 255.0) * 2.0 - 1.0
+        video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
+        print(f"Resizing whole frame to 512x512.")
 
     video_embedding_path = video_path.replace(".mp4", "_video_512_latent.safetensors")
     if video_folder is not None and latent_folder is not None:
@@ -1283,6 +1353,10 @@ def sample(
             raw_audio[: complete_video.shape[0]], "f s -> () (f s)"
         )
 
+    if paste_back_to_body and crop_data is not None:
+        print("Stitching synced face back to original video...")
+        complete_video = paste_back(complete_video, original_video, crop_data)
+
     save_audio_video(
         complete_video,
         audio=complete_audio,
@@ -1504,6 +1578,7 @@ def main(
     nose_index: int = 28,
     save_occlusion_mask: bool = False,
     recompute: bool = False,
+    paste_back_to_body: bool = False,
 ) -> None:
     """
     Main function to run the dubbing pipeline.
@@ -1673,6 +1748,7 @@ def main(
                 nose_index=nose_index,
                 save_occlusion_mask=save_occlusion_mask,
                 recompute=recompute,
+                paste_back_to_body=paste_back_to_body,
             )
         except Exception as e:
             raise e

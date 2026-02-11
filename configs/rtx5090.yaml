@@ -1,0 +1,33 @@
+# Optimized configuration for NVIDIA RTX 5090 (32GB VRAM)
+lightning:
+  trainer:
+    accelerator: "gpu"
+    devices: -1
+    precision: "bf16-mixed"
+    accumulate_grad_batches: 1
+    max_epochs: 1000
+    benchmark: True
+  
+  modelcheckpoint:
+    params:
+      every_n_train_steps: 2500
+      save_top_k: 3
+
+data:
+  params:
+    train:
+      loader:
+        batch_size: 4
+        num_workers: 8
+      datapipeline:
+        resize_size: 512
+        num_frames: 14
+        what_mask: "full"  # Default to full body mask for better upper body movement
+
+model:
+  base_learning_rate: 1.e-5
+  params:
+    compile_model: True  # Enable torch.compile for 5090 performance
+    network_config:
+      params:
+        use_checkpoint: True # Gradient checkpointing
