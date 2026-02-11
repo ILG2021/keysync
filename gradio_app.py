@@ -14,6 +14,10 @@ SCRIPTS_DIR = os.path.join(ROOT_DIR, "scripts")
 OUTPUT_DIR = os.path.join(ROOT_DIR, "gradio_outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Environment with PYTHONPATH
+ENV = os.environ.copy()
+ENV["PYTHONPATH"] = ROOT_DIR + os.pathsep + ENV.get("PYTHONPATH", "")
+
 # Training process tracking
 training_process = None
 training_logs_list = []
@@ -43,15 +47,15 @@ def preprocess_video(video_path):
     landmark_path = video_path.replace(".mp4", ".npy")
     if not os.path.exists(landmark_path):
         print(f"Generating landmarks for {video_path}...")
-        cmd = [sys.executable, "scripts/util/gen_landmarks.py", os.path.dirname(video_path), "--output_dir", os.path.dirname(video_path)]
-        subprocess.run(cmd)
+        cmd = [sys.executable, "scripts/util/gen_landmarks.py", os.path.dirname(video_path) if os.path.dirname(video_path) else ".", "--output_dir", os.path.dirname(video_path) if os.path.dirname(video_path) else "."]
+        subprocess.run(cmd, env=ENV, cwd=ROOT_DIR)
     
     # Latents
     latent_path = video_path.replace(".mp4", "_video_512_latent.safetensors")
     if not os.path.exists(latent_path):
         print(f"Generating latents for {video_path}...")
         cmd = [sys.executable, "scripts/util/video_to_latent.py", "--filelist", video_path]
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=ENV, cwd=ROOT_DIR)
     
     return landmark_path, latent_path
 
@@ -103,7 +107,7 @@ def run_inference(
         cmd.append("True")
     
     try:
-        process = subprocess.run(cmd, env=os.environ, capture_output=True, text=True)
+        process = subprocess.run(cmd, env=ENV, cwd=ROOT_DIR, capture_output=True, text=True)
         if process.returncode != 0:
             return f"Inference Error: {process.stderr}\n{process.stdout}", None
         
@@ -152,7 +156,7 @@ def start_training(
     ]
     
     # Start process
-    training_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    training_process = subprocess.Popen(cmd, env=ENV, cwd=ROOT_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     
     # Start log reader thread
     thread = threading.Thread(target=log_reader, args=(training_process.stdout,))
