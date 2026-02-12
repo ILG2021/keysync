@@ -58,49 +58,70 @@ def main():
     current_v_25 = os.path.join(video_in_dir, "video.mp4")
     
     if abs(fps - 25.0) > 0.1:
-        print(f"-> Detected {fps}fps. Converting to 25fps via FFmpeg...")
-        run_cmd(["ffmpeg", "-i", video_path, "-r", "25", "-c:v", "libx264", "-crf", "18", "-y", current_v_25])
+        if not os.path.exists(current_v_25):
+            print(f"-> Detected {fps}fps. Converting to 25fps via FFmpeg...")
+            run_cmd(["ffmpeg", "-i", video_path, "-r", "25", "-c:v", "libx264", "-crf", "18", "-y", current_v_25])
+        else:
+            print("-> 25fps video already exists, skipping conversion.")
     else:
         if not os.path.exists(current_v_25):
             shutil.copy2(video_path, current_v_25)
 
     current_a_16k = os.path.join(work_dir, "audio_16k.wav")
-    print("-> Converting audio to 16k mono...")
-    run_cmd(["ffmpeg", "-i", audio_path, "-ar", "16000", "-ac", "1", "-y", current_a_16k])
+    if not os.path.exists(current_a_16k):
+        print("-> Converting audio to 16k mono...")
+        run_cmd(["ffmpeg", "-i", audio_path, "-ar", "16000", "-ac", "1", "-y", current_a_16k])
+    else:
+        print("-> 16k audio already exists, skipping conversion.")
 
     # 2. 提取全视频关键点 (Landmarks)
-    print("-> Extracting face landmarks...")
-    run_cmd([sys.executable, "scripts/util/gen_landmarks.py", video_in_dir, "--output_dir", video_in_dir])
+    # gen_landmarks.py treats exist check itself, but we can double check here
+    v_lmk_exists = os.path.exists(current_v_25.replace(".mp4", ".npy"))
+    if not v_lmk_exists:
+        print("-> Extracting face landmarks...")
+        run_cmd([sys.executable, "scripts/util/gen_landmarks.py", video_in_dir, "--output_dir", video_in_dir])
+    else:
+        print("-> Landmarks already exist, skipping extraction.")
     
     # 3. 裁剪面部 (512x512) 用于 Embedding 计算
-    print("-> Cropping face region (memory-efficient)...")
-    run_cmd([
-        sys.executable, "scripts/util/crop_video.py",
-        "--video_dir", video_in_dir,
-        "--video_dir_cropped", video_crop_dir,
-        "--landmarks_dir", video_in_dir,
-        "--landmarks_dir_cropped", video_crop_dir
-    ])
     cropped_v_path = os.path.join(video_crop_dir, "video.mp4")
+    if not os.path.exists(cropped_v_path):
+        print("-> Cropping face region (memory-efficient)...")
+        run_cmd([
+            sys.executable, "scripts/util/crop_video.py",
+            "--video_dir", video_in_dir,
+            "--video_dir_cropped", video_crop_dir,
+            "--landmarks_dir", video_in_dir,
+            "--landmarks_dir_cropped", video_crop_dir
+        ])
+    else:
+        print("-> Cropped face video already exists, skipping crop.")
 
     # 4. 生成 Latents (Embedding)
+    # video_to_latent.py has internal skip logic
     print("-> Generating VAE latent vectors for the face...")
     run_cmd([sys.executable, "scripts/util/video_to_latent.py", "--filelist", cropped_v_path])
 
     # 5. 执行推理与缝合 (Paste-back)
-    print("-> Running inference and stitching back to body...")
-    run_cmd([
-        sys.executable, "scripts/sampling/dubbing_pipeline.py",
-        "--filelist", current_v_25,
-        "--filelist_audio", current_a_16k,
-        "--keyframes_ckpt", args.keyframes_ckpt,
-        "--interpolation_ckpt", args.interpolation_ckpt,
-        "--output_folder", args.output_dir,
-        "--paste_back_to_body", "True",
-        "--recompute", "True",
-        "--decoding_t", str(args.decoding_t),
-        "--what_mask", "box"
-    ])
+    # Check if target video already exists in output folder
+    final_v_path = os.path.join(args.output_dir, video_stem + ".mp4")
+    if os.path.exists(final_v_path):
+        print(f"\n[INFO] Final output already exists at {final_v_path}.")
+        print("If you want to re-run, delete the output file or change output_dir.")
+    else:
+        print("-> Running inference and stitching back to body...")
+        run_cmd([
+            sys.executable, "scripts/sampling/dubbing_pipeline.py",
+            "--filelist", current_v_25,
+            "--filelist_audio", current_a_16k,
+            "--keyframes_ckpt", args.keyframes_ckpt,
+            "--interpolation_ckpt", args.interpolation_ckpt,
+            "--output_folder", args.output_dir,
+            "--paste_back_to_body", "True",
+            "--recompute", "True",
+            "--decoding_t", str(args.decoding_t),
+            "--what_mask", "box"
+        ])
 
     print(f"\n[SUCCESS] Final output saved in: {args.output_dir}")
 
