@@ -79,13 +79,18 @@ def main():
         print("-> 16k audio already exists, skipping conversion.")
 
     # 2. 提取全视频关键点 (Landmarks)
-    # gen_landmarks.py treats exist check itself, but we can double check here
-    v_lmk_exists = os.path.exists(current_v_25.replace(".mp4", ".npy"))
-    if not v_lmk_exists:
+    v_lmk_path = os.path.join(video_in_dir, "video.npy")
+    if not os.path.exists(v_lmk_path):
         print("-> Extracting face landmarks...")
         run_cmd([sys.executable, "scripts/util/gen_landmarks.py", video_in_dir, "--output_dir", video_in_dir])
     else:
         print("-> Landmarks already exist, skipping extraction.")
+    
+    # Safety check: landmarks must exist to continue
+    if not os.path.exists(v_lmk_path):
+        print(f"[ERROR] Landmarks file not found at {v_lmk_path}")
+        print("gen_landmarks.py may have failed. Check its output above.")
+        sys.exit(1)
     
     # 3. 裁剪面部 (512x512) 用于 Embedding 计算
     cropped_v_path = os.path.join(video_crop_dir, "video.mp4")
@@ -107,28 +112,62 @@ def main():
     run_cmd([sys.executable, "scripts/util/video_to_latent.py", "--filelist", cropped_v_path])
 
     # 5. 执行推理与缝合 (Paste-back)
-    # Check if target video already exists in output folder
-    final_v_path = os.path.join(args.output_dir, video_stem + ".mp4")
+    # dubbing_pipeline expects:
+    #   --filelist: the video to process (cropped for face-only, or original for paste-back)
+    #   --video_folder / --landmark_folder / --latent_folder: to locate .npy and .safetensors
+    # When paste_back_to_body=True, it needs the ORIGINAL video as --filelist
+    #   and the landmarks/latents from the cropped version.
+    # When paste_back_to_body=False, it uses the cropped video directly.
+    
+    paste_back = args.paste_back_to_body.lower() in ("true", "1", "yes")
+    
+    final_v_path = os.path.join(args.output_dir, "video.mp4")
     if os.path.exists(final_v_path):
         print(f"\n[INFO] Final output already exists at {final_v_path}.")
         print("If you want to re-run, delete the output file or change output_dir.")
     else:
         print("-> Running inference and stitching back to body...")
-        run_cmd([
-            sys.executable, "scripts/sampling/dubbing_pipeline.py",
-            "--filelist", current_v_25,
-            "--filelist_audio", current_a_16k,
-            "--keyframes_ckpt", args.keyframes_ckpt,
-            "--interpolation_ckpt", args.interpolation_ckpt,
-            "--model_config", args.interpolation_config,
-            "--model_keyframes_config", args.keyframes_config,
-            "--output_folder", args.output_dir,
-            "--paste_back_to_body", args.paste_back_to_body,
-            "--recompute", "True",
-            "--decoding_t", str(args.decoding_t),
-            "--chunk_size", str(args.chunk_size),
-            "--what_mask", "box"
-        ])
+        
+        if paste_back:
+            # For paste-back: feed original video, landmarks from input_v, latents from crop_v
+            run_cmd([
+                sys.executable, "scripts/sampling/dubbing_pipeline.py",
+                "--filelist", current_v_25,
+                "--filelist_audio", current_a_16k,
+                "--keyframes_ckpt", args.keyframes_ckpt,
+                "--interpolation_ckpt", args.interpolation_ckpt,
+                "--model_config", args.interpolation_config,
+                "--model_keyframes_config", args.keyframes_config,
+                "--output_folder", args.output_dir,
+                "--video_folder", video_in_dir,
+                "--landmark_folder", video_in_dir,
+                "--latent_folder", video_crop_dir,
+                "--paste_back_to_body", "True",
+                "--recompute", "True",
+                "--decoding_t", str(args.decoding_t),
+                "--chunk_size", str(args.chunk_size),
+                "--what_mask", "box"
+            ])
+        else:
+            # For face-only: feed cropped video directly
+            run_cmd([
+                sys.executable, "scripts/sampling/dubbing_pipeline.py",
+                "--filelist", cropped_v_path,
+                "--filelist_audio", current_a_16k,
+                "--keyframes_ckpt", args.keyframes_ckpt,
+                "--interpolation_ckpt", args.interpolation_ckpt,
+                "--model_config", args.interpolation_config,
+                "--model_keyframes_config", args.keyframes_config,
+                "--output_folder", args.output_dir,
+                "--video_folder", video_crop_dir,
+                "--landmark_folder", video_crop_dir,
+                "--latent_folder", video_crop_dir,
+                "--paste_back_to_body", "False",
+                "--recompute", "True",
+                "--decoding_t", str(args.decoding_t),
+                "--chunk_size", str(args.chunk_size),
+                "--what_mask", "box"
+            ])
 
     print(f"\n[SUCCESS] Final output saved in: {args.output_dir}")
 
