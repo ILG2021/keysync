@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--audio", required=True, help="Path to your target audio (.wav/.mp3)")
     parser.add_argument("--keyframes_ckpt", default="pretrained_models/checkpoints/keyframes.ckpt")
     parser.add_argument("--interpolation_ckpt", default="pretrained_models/checkpoints/interpolation.ckpt")
+    parser.add_argument("--keyframes_config", default="configs/example_training/keyframes/keyframes_dub.yaml")
+    parser.add_argument("--interpolation_config", default="configs/example_training/interpolation/interpolation_dub.yaml")
     parser.add_argument("--output_dir", default="outputs/single_results")
     parser.add_argument("--decoding_t", type=int, default=14, help="Lower if OOM (default 14)")
     args = parser.parse_args()
@@ -116,6 +118,8 @@ def main():
             "--filelist_audio", current_a_16k,
             "--keyframes_ckpt", args.keyframes_ckpt,
             "--interpolation_ckpt", args.interpolation_ckpt,
+            "--model_config", args.interpolation_config,
+            "--model_keyframes_config", args.keyframes_config,
             "--output_folder", args.output_dir,
             "--paste_back_to_body", "True",
             "--recompute", "True",
