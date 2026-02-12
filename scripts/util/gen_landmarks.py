@@ -7,12 +7,8 @@ from landmarks_extractor import LandmarksExtractor
 
 
 def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
-    video_parent_dir = os.path.dirname(video_path).split("/")[-1]
-
-    # Get video name without extension
-    output_path = video_path.replace(video_parent_dir, output_dir).replace(
-        ".mp4", ".npy"
-    )
+    video_filename = os.path.basename(video_path).replace(".mp4", ".npy")
+    output_path = os.path.join(output_dir, video_filename)
 
     if os.path.exists(output_path):
         print(f"Landmarks already exist for {video_path}, skipping...")

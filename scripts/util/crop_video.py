@@ -28,7 +28,7 @@ def main(input_video_dir, output_video_dir, input_landmarks_dir, output_landmark
     for video_file in tqdm(video_files, desc="Processing videos"):
         input_video_path = os.path.join(input_video_dir, video_file)
         output_video_path = os.path.join(output_video_dir, video_file)
-        video_parent_dir = os.path.dirname(input_video_path).split("/")[-1]
+        lmk_file = video_file.replace('.mp4', '.npy')
         
         # Open video and get properties
         cap = cv2.VideoCapture(input_video_path)
@@ -37,7 +37,7 @@ def main(input_video_dir, output_video_dir, input_landmarks_dir, output_landmark
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        landmarks_path = input_video_path.replace('.mp4', '.npy').replace(video_parent_dir, input_landmarks_dir)
+        landmarks_path = os.path.join(input_landmarks_dir, lmk_file)
         if not os.path.exists(landmarks_path):
             print(f"Skipping {video_file} because landmarks not found at {landmarks_path}")
             cap.release()
@@ -83,7 +83,7 @@ def main(input_video_dir, output_video_dir, input_landmarks_dir, output_landmark
         out.release()
         
         # Process landmarks
-        output_landmarks_path = input_video_path.replace('.mp4', '.npy').replace(video_parent_dir, output_landmarks_dir)
+        output_landmarks_path = os.path.join(output_landmarks_dir, lmk_file)
         os.makedirs(os.path.dirname(output_landmarks_path), exist_ok=True)
         np.save(output_landmarks_path, np.stack(processed_landmarks))
 
