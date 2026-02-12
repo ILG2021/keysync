@@ -32,7 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description="End-to-end full body lip-sync pipeline.")
     parser.add_argument("--video", required=True, help="Path to your input full-body video (.mp4)")
     parser.add_argument("--audio", required=True, help="Path to your target audio (.wav/.mp3)")
-    parser.add_argument("--keyframes_ckpt", default="pretrained_models/checkpoints/keyframes_dub.pt")
+    parser.add_argument("--keyframes_ckpt", default="pretrained_models/checkpoints/keyframe_dub.pt")
     parser.add_argument("--interpolation_ckpt", default="pretrained_models/checkpoints/interpolation_dub.pt")
     parser.add_argument("--keyframes_config", default="configs/example_training/keyframes/keyframes_dub.yaml")
     parser.add_argument("--interpolation_config", default="configs/example_training/interpolation/interpolation_dub.yaml")
