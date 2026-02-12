@@ -6,6 +6,18 @@ import cv2
 import shutil
 from pathlib import Path
 
+# outputs/single_results/
+#   footage_name/
+#     input_v/
+#       video.mp4          ← Step 1: 25fps 视频
+#       video.npy          ← Step 2: Landmarks
+#     crop_v/
+#       video.mp4          ← Step 3: 裁剪后的面部视频
+#       video.npy          ← Step 3: 裁剪后的 Landmarks
+#       video_video_512_latent.safetensors  ← Step 4: Latent
+#     audio_16k.wav        ← Step 1: 16k 音频
+
+
 # Roots
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(ROOT_DIR)
@@ -107,9 +119,9 @@ def main():
         print("-> Cropped face video already exists, skipping crop.")
 
     # 4. 生成 Latents (Embedding)
-    # video_to_latent.py has internal skip logic
+    # NOTE: video_to_latent.py expects a DIRECTORY (it globs *.mp4 inside), not a file path
     print("-> Generating VAE latent vectors for the face...")
-    run_cmd([sys.executable, "scripts/util/video_to_latent.py", "--filelist", cropped_v_path])
+    run_cmd([sys.executable, "scripts/util/video_to_latent.py", "--filelist", video_crop_dir])
 
     # 5. 执行推理与缝合 (Paste-back)
     # dubbing_pipeline expects:
