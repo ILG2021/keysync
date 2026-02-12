@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--output_dir", default="outputs/single_results")
     parser.add_argument("--decoding_t", type=int, default=4, help="Number of frames decoded at a time. Lower (e.g., 2-4) to save VRAM.")
     parser.add_argument("--chunk_size", type=int, default=4, help="Inference chunk size. Lower (e.g., 4) to save RAM.")
+    parser.add_argument("--paste_back_to_body", type=str, default="True", help="Whether to stitch the face back to the original video (True/False)")
     args = parser.parse_args()
 
     # 路径初始化
@@ -122,7 +123,7 @@ def main():
             "--model_config", args.interpolation_config,
             "--model_keyframes_config", args.keyframes_config,
             "--output_folder", args.output_dir,
-            "--paste_back_to_body", "True",
+            "--paste_back_to_body", args.paste_back_to_body,
             "--recompute", "True",
             "--decoding_t", str(args.decoding_t),
             "--chunk_size", str(args.chunk_size),

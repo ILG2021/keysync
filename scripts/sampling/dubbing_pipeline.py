@@ -861,19 +861,23 @@ def sample_interpolation(
     return vid
 
 
-def paste_back(processed_video, original_video, crop_data):
+def paste_back(processed_video, video_path, crop_data):
     """
     Stitches the processed 512x512 face/crop back into the original video frames.
     processed_video: numpy array [T, C, H, W] in [0, 255] (uint8)
-    original_video: torch tensor [T, C, H, W] in [0, 255] (uint8)
+    video_path: path to original video
     crop_data: List of CropData objects
     """
     T = processed_video.shape[0]
     # Convert to T, H, W, C for processing
     p_vid = np.transpose(processed_video, (0, 2, 3, 1))
-    o_vid = rearrange(original_video[:T], "t c h w -> t h w c").cpu().numpy()
     
-    out_video = o_vid.copy()
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    out_video = np.zeros((T, height, width, 3), dtype=np.uint8)
     
     # Create a soft mask for blending
     mask = np.ones((512, 512, 1), dtype=np.float32)
@@ -886,12 +890,17 @@ def paste_back(processed_video, original_video, crop_data):
         mask[:, 511-i] *= alpha
         
     for i in range(T):
+        ret, o_frame = cap.read()
+        if not ret:
+            break
+            
         data = crop_data[i]
-        x1, y1, x2, y2 = data.x_start, data.y_start, data.x_end, data.y_end
+        x1, y1, x2, y2 = int(data.x_start), int(data.y_start), int(data.x_end), int(data.y_end)
         target_w = x2 - x1
         target_h = y2 - y1
         
         if target_w <= 0 or target_h <= 0:
+            out_video[i] = cv2.cvtColor(o_frame, cv2.COLOR_BGR2RGB)
             continue
             
         # Resize processed 512x512 crop and the mask back to the original box size
@@ -901,10 +910,13 @@ def paste_back(processed_video, original_video, crop_data):
             m_frame = m_frame[:, :, None]
         
         # Blend processed crop with original frame
-        orig_region = out_video[i, y1:y2, x1:x2].astype(np.float32)
+        o_frame_rgb = cv2.cvtColor(o_frame, cv2.COLOR_BGR2RGB)
+        orig_region = o_frame_rgb[y1:y2, x1:x2].astype(np.float32)
         blended = p_frame.astype(np.float32) * m_frame + orig_region * (1.0 - m_frame)
-        out_video[i, y1:y2, x1:x2] = blended.astype(np.uint8)
+        o_frame_rgb[y1:y2, x1:x2] = blended.astype(np.uint8)
+        out_video[i] = o_frame_rgb
         
+    cap.release()
     # Convert back to T, C, H, W
     out_video = np.transpose(out_video, (0, 3, 1, 2))
     return out_video
@@ -998,9 +1010,10 @@ def sample(
 
     torch.manual_seed(seed)
 
-    original_video = read_video(video_path, output_format="TCHW")[0]
-    h, w = original_video.shape[2:]
-    original_len = original_video.shape[0]
+    cap = cv2.VideoCapture(video_path)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    original_len = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     landmarks_path = video_path
     if landmark_folder is not None:
@@ -1013,15 +1026,34 @@ def sample(
     crop_data = None
     if paste_back_to_body:
         preprocessor = VideoPreProcessor(crop_type="union", resize_size=512)
-        # VideoPreProcessor expects [T, C, H, W] uint8
-        proc_out = preprocessor(landmarks[:, :, :2], original_video)
-        video = (proc_out.video / 255.0) * 2.0 - 1.0
-        crop_data = proc_out.crop_data
+        crop_data = preprocessor.get_crop_data(landmarks[:, :, :2], h, w)
+        
+        # Crop video frame by frame to save memory
+        cropped_frames = []
+        for i in range(original_len):
+            ret, frame = cap.read()
+            if not ret: break
+            # Convert BGR to RGB and tensor
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1)
+            cropped_f, _, _, _ = preprocessor.crop_single_frame(frame_tensor, landmarks[i, :, :2], crop_data[i])
+            cropped_frames.append(cropped_f)
+        video = (torch.stack(cropped_frames) / 255.0) * 2.0 - 1.0
         print(f"Using VideoPreProcessor for full body support. Cropped to 512x512.")
     else:
-        video = (original_video / 255.0) * 2.0 - 1.0
-        video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
+        # If not pasting back, we still need the cropped version for the model
+        # but here the original code was resizing the WHOLE frame.
+        # To save memory, we still read frame by frame.
+        frames = []
+        for i in range(original_len):
+            ret, frame = cap.read()
+            if not ret: break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1)
+            frames.append(torch.nn.functional.interpolate(frame_tensor[None], (512, 512), mode="bilinear")[0])
+        video = (torch.stack(frames) / 255.0) * 2.0 - 1.0
         print(f"Resizing whole frame to 512x512.")
+    cap.release()
 
     video_embedding_path = video_path.replace(".mp4", "_video_512_latent.safetensors")
     if video_folder is not None and latent_folder is not None:
@@ -1355,7 +1387,7 @@ def sample(
 
     if paste_back_to_body and crop_data is not None:
         print("Stitching synced face back to original video...")
-        complete_video = paste_back(complete_video, original_video, crop_data)
+        complete_video = paste_back(complete_video, video_path, crop_data)
 
     save_audio_video(
         complete_video,
