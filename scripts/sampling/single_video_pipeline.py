@@ -79,10 +79,14 @@ def main():
         print("-> 16k audio already exists, skipping conversion.")
 
     # 2. 提取全视频关键点 (Landmarks)
+    # NOTE: gen_landmarks.py uses string replacement for output path:
+    #   output = video_path.replace(parent_dir_name, output_dir)
+    # So output_dir must be a simple dir name (e.g. "input_v"), NOT a full path.
+    video_in_dir_name = os.path.basename(video_in_dir)  # "input_v"
     v_lmk_path = os.path.join(video_in_dir, "video.npy")
     if not os.path.exists(v_lmk_path):
         print("-> Extracting face landmarks...")
-        run_cmd([sys.executable, "scripts/util/gen_landmarks.py", video_in_dir, "--output_dir", video_in_dir])
+        run_cmd([sys.executable, "scripts/util/gen_landmarks.py", video_in_dir, "--output_dir", video_in_dir_name])
     else:
         print("-> Landmarks already exist, skipping extraction.")
     
