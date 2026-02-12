@@ -37,7 +37,8 @@ def main():
     parser.add_argument("--keyframes_config", default="configs/example_training/keyframes/keyframes_dub.yaml")
     parser.add_argument("--interpolation_config", default="configs/example_training/interpolation/interpolation_dub.yaml")
     parser.add_argument("--output_dir", default="outputs/single_results")
-    parser.add_argument("--decoding_t", type=int, default=14, help="Lower if OOM (default 14)")
+    parser.add_argument("--decoding_t", type=int, default=4, help="Number of frames decoded at a time. Lower (e.g., 2-4) to save VRAM.")
+    parser.add_argument("--chunk_size", type=int, default=4, help="Inference chunk size. Lower (e.g., 4) to save RAM.")
     args = parser.parse_args()
 
     # 路径初始化
@@ -124,6 +125,7 @@ def main():
             "--paste_back_to_body", "True",
             "--recompute", "True",
             "--decoding_t", str(args.decoding_t),
+            "--chunk_size", str(args.chunk_size),
             "--what_mask", "box"
         ])
 
