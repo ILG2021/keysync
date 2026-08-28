@@ -9,7 +9,7 @@ model:
     encoder_config:
       target: sgm.modules.diffusionmodules.model.Encoder
       params:
-        attn_type: vanilla-xformers
+        attn_type: vanilla-sdpa
         double_z: true
         z_channels: 8
         resolution: 256

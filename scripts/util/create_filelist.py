@@ -106,7 +106,9 @@ for root, dirs, files in os.walk(root_dir):
             if args.id_type == "split":
                 files_dict[file.split("_")[0].split("-")[0]].append(complete_path)
             elif args.id_type == "prev_folder":
-                files_dict[complete_path.split("/")[-2]].append(complete_path)
+                files_dict[os.path.basename(os.path.dirname(complete_path))].append(
+                    complete_path
+                )
             else:
                 raise ValueError("id_type must be split or prev_folder")
             # f.write(os.path.join(root, file) + "\n")

@@ -1079,7 +1079,9 @@ def sample(
 
         if save_occlusion_mask:
             video_name = os.path.basename(video_path).replace(".mp4", "")
-            output_path = f"/vol/paramonos2/projects/antoni/code/Personal/keyface/outputs/{video_name}_mask_arms.npy"
+            mask_folder = output_folder if output_folder is not None else "outputs"
+            os.makedirs(mask_folder, exist_ok=True)
+            output_path = os.path.join(mask_folder, f"{video_name}_mask_arms.npy")
             np.save(output_path, mask_arms)
 
         mask_arms = mask_arms[:max_frames]

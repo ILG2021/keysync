@@ -76,7 +76,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process videos for emotion detection")
     parser.add_argument(
         "--model_path",
-        default="/data/home/antoni/code/generative-models/scripts/util/detector_8class_va.pt",
+        default=os.path.join(os.path.dirname(__file__), "detector_8class_va.pt"),
         help="Path to the emotion detection model",
     )
     parser.add_argument("--filelist", required=True, help="Path to the file containing list of video paths")

@@ -12,16 +12,8 @@ from packaging import version
 
 logpy = logging.getLogger(__name__)
 
-try:
-    import xformers
-    import xformers.ops
-
-    XFORMERS_IS_AVAILABLE = True
-except:
-    XFORMERS_IS_AVAILABLE = False
-    logpy.warning("no module 'xformers'. Processing without...")
-
-from ...modules.attention import LinearAttention, MemoryEfficientCrossAttention
+from ...modules.attention import LinearAttention, SDPACrossAttention
+from ...modules.sdpa import SDPA_IS_AVAILABLE, memory_efficient_attention
 
 
 def get_timestep_embedding(timesteps, embedding_dim):
@@ -176,14 +168,13 @@ class AttnBlock(nn.Module):
         return x + h_
 
 
-class MemoryEfficientAttnBlock(nn.Module):
+class SDPAAttnBlock(nn.Module):
     """
-    Uses xformers efficient implementation,
+    Uses torch scaled_dot_product_attention,
     see https://github.com/MatthieuTPHR/diffusers/blob/d80b531ff8060ec1ea982b65a1b8df70f73aa67c/src/diffusers/models/attention.py#L223
     Note: this is a single-head self-attention operation
     """
 
-    #
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
@@ -193,7 +184,6 @@ class MemoryEfficientAttnBlock(nn.Module):
         self.k = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.v = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.proj_out = torch.nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.attention_op: Optional[Any] = None
 
     def attention(self, h_: torch.Tensor) -> torch.Tensor:
         h_ = self.norm(h_)
@@ -203,19 +193,9 @@ class MemoryEfficientAttnBlock(nn.Module):
 
         # compute attention
         B, C, H, W = q.shape
-        q, k, v = map(lambda x: rearrange(x, "b c h w -> b (h w) c"), (q, k, v))
+        q, k, v = map(lambda x: rearrange(x, "b c h w -> b (h w) c").contiguous(), (q, k, v))
 
-        q, k, v = map(
-            lambda t: t.unsqueeze(3)
-            .reshape(B, t.shape[1], 1, C)
-            .permute(0, 2, 1, 3)
-            .reshape(B * 1, t.shape[1], C)
-            .contiguous(),
-            (q, k, v),
-        )
-        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
-
-        out = out.unsqueeze(0).reshape(B, 1, out.shape[1], C).permute(0, 2, 1, 3).reshape(B, out.shape[1], C)
+        out = memory_efficient_attention(q, k, v)
         return rearrange(out, "b (h w) c -> b c h w", b=B, h=H, w=W, c=C)
 
     def forward(self, x, **kwargs):
@@ -225,7 +205,7 @@ class MemoryEfficientAttnBlock(nn.Module):
         return x + h_
 
 
-class MemoryEfficientCrossAttentionWrapper(MemoryEfficientCrossAttention):
+class SDPACrossAttentionWrapper(SDPACrossAttention):
     def forward(self, x, context=None, mask=None, **unused_kwargs):
         b, c, h, w = x.shape
         x = rearrange(x, "b c h w -> b (h w) c")
@@ -237,27 +217,30 @@ class MemoryEfficientCrossAttentionWrapper(MemoryEfficientCrossAttention):
 def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
     assert attn_type in [
         "vanilla",
+        "vanilla-sdpa",
         "vanilla-xformers",
         "memory-efficient-cross-attn",
         "linear",
         "none",
     ], f"attn_type {attn_type} unknown"
-    if version.parse(torch.__version__) < version.parse("2.0.0") and attn_type != "none":
-        assert XFORMERS_IS_AVAILABLE, (
+    if attn_type == "vanilla-xformers":
+        # Deprecated alias kept so older configs and checkpoints keep loading.
+        attn_type = "vanilla-sdpa"
+    if attn_type != "none":
+        assert SDPA_IS_AVAILABLE, (
             f"We do not support vanilla attention in {torch.__version__} anymore, "
-            f"as it is too expensive. Please install xformers via e.g. 'pip install xformers==0.0.16'"
+            f"as it is too expensive. Please upgrade to PyTorch >= 2.0."
         )
-        attn_type = "vanilla-xformers"
     logpy.info(f"making attention of type '{attn_type}' with {in_channels} in_channels")
     if attn_type == "vanilla":
         assert attn_kwargs is None
         return AttnBlock(in_channels)
-    elif attn_type == "vanilla-xformers":
-        logpy.info(f"building MemoryEfficientAttnBlock with {in_channels} in_channels...")
-        return MemoryEfficientAttnBlock(in_channels)
-    elif type == "memory-efficient-cross-attn":
+    elif attn_type == "vanilla-sdpa":
+        logpy.info(f"building SDPAAttnBlock with {in_channels} in_channels...")
+        return SDPAAttnBlock(in_channels)
+    elif attn_type == "memory-efficient-cross-attn":
         attn_kwargs["query_dim"] = in_channels
-        return MemoryEfficientCrossAttentionWrapper(**attn_kwargs)
+        return SDPACrossAttentionWrapper(**attn_kwargs)
     elif attn_type == "none":
         return nn.Identity(in_channels)
     else:
@@ -744,3 +727,8 @@ class FaceLocator(torch.nn.Module):
         embedding = self.conv_out(embedding)
 
         return embedding
+
+
+# Deprecated aliases kept for backwards compatibility with older configs.
+MemoryEfficientAttnBlock = SDPAAttnBlock
+MemoryEfficientCrossAttentionWrapper = SDPACrossAttentionWrapper

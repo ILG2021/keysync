@@ -16,7 +16,7 @@ from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.utilities import rank_zero_only
 
-from sgm.util import instantiate_from_config
+from sgm.util import IS_WINDOWS, instantiate_from_config
 
 
 MULTINODE_HACKS = True
@@ -206,7 +206,7 @@ def get_checkpoint_name(logdir):
         with open(os.path.join(logdir, "most_recent_ckpt.txt"), "w") as f:
             f.write(ckpt + "\n")
         try:
-            version = int(ckpt.split("/")[-1].split("-v")[-1].split(".")[0])
+            version = int(os.path.basename(ckpt).split("-v")[-1].split(".")[0])
         except Exception as e:
             print("version confusion but not bad")
             print(e)
@@ -261,13 +261,13 @@ if __name__ == "__main__":
         if not os.path.exists(opt.resume):
             raise ValueError("Cannot find {}".format(opt.resume))
         if os.path.isfile(opt.resume):
-            paths = opt.resume.split("/")
-            logdir = "/".join(paths[:-2])
+            # <logdir>/checkpoints/<name>.ckpt -> <logdir>
+            logdir = os.path.dirname(os.path.dirname(opt.resume))
             ckpt = opt.resume
             _, melk_ckpt_name = get_checkpoint_name(logdir)
         else:
             assert os.path.isdir(opt.resume), opt.resume
-            logdir = opt.resume.rstrip("/")
+            logdir = opt.resume.rstrip("/\\")
             ckpt, melk_ckpt_name = get_checkpoint_name(logdir)
 
         print("#" * 100)
@@ -275,10 +275,9 @@ if __name__ == "__main__":
         print("#" * 100)
 
         opt.resume_from_checkpoint = ckpt
-        base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
+        base_configs = sorted(glob.glob(os.path.join(logdir, "configs", "*.yaml")))
         opt.base = base_configs + opt.base
-        _tmp = logdir.split("/")
-        nowname = _tmp[-1]
+        nowname = os.path.basename(logdir.rstrip("/\\"))
     else:
         if opt.name:
             name = "_" + opt.name
@@ -438,9 +437,17 @@ if __name__ == "__main__":
     default_strategy_config = {"target": "pytorch_lightning.strategies.DDPStrategy"}
 
     if "strategy" in lightning_config:
+        requested_strategy = lightning_config.strategy
+        if IS_WINDOWS and isinstance(requested_strategy, str) and "deepspeed" in requested_strategy:
+            print(
+                f"DeepSpeed ('{requested_strategy}') is not supported on Windows, "
+                f"falling back to 'auto'. Pass lightning.strategy=ddp for multi-GPU "
+                f"training (it uses the gloo backend on Windows)."
+            )
+            requested_strategy = "auto"
         strategy_cfg = OmegaConf.create()
         default_strategy_config = {}
-        default_strategy_config["strategy"] = lightning_config.strategy
+        default_strategy_config["strategy"] = requested_strategy
     else:
         strategy_cfg = OmegaConf.create()
         unused_params = lightning_config.pop("unused_params", False)
@@ -597,8 +604,11 @@ if __name__ == "__main__":
 
     import signal
 
-    signal.signal(signal.SIGUSR1, melk)
-    signal.signal(signal.SIGUSR2, divein)
+    # SIGUSR1/SIGUSR2 are POSIX-only; on Windows we simply skip the handlers.
+    if hasattr(signal, "SIGUSR1"):
+        signal.signal(signal.SIGUSR1, melk)
+    if hasattr(signal, "SIGUSR2"):
+        signal.signal(signal.SIGUSR2, divein)
 
     # run
     if opt.train:

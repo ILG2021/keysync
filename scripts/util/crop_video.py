@@ -33,7 +33,7 @@ def main(input_video_dir, output_video_dir, input_landmarks_dir, output_landmark
         input_video_path = os.path.join(input_video_dir, video_file)
         output_video_path = os.path.join(output_video_dir, video_file)
 
-        video_parent_dir = os.path.dirname(input_video_path).split("/")[-1]
+        video_parent_dir = os.path.basename(os.path.dirname(input_video_path))
         
         # Read the video
         video, _, info = read_video(input_video_path, output_format="TCHW")

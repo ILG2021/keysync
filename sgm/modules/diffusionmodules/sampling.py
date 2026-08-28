@@ -2,6 +2,7 @@
 Partially ported from https://github.com/crowsonkb/k-diffusion/blob/master/k_diffusion/sampling.py
 """
 
+import os
 from collections import defaultdict
 from typing import Dict, Union
 
@@ -258,7 +259,8 @@ class FIFOEDMSampler(FIFODiffusionSampler):
         c_list = defaultdict(list)
         uc_list = defaultdict(list)
 
-        video = torch.load("/data/home/antoni/code/generative-models-dub/samples_z.pt")
+        # Debug latents; override the location with KEYSYNC_SAMPLES_Z if needed.
+        video = torch.load(os.environ.get("KEYSYNC_SAMPLES_Z", "samples_z.pt"))
         video = rearrange(video, "t c h w -> () c t h w")
 
         for k, v in c.items():

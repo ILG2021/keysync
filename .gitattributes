@@ -1,0 +1,20 @@
+# Normalize line endings so the repo works from Windows and Linux alike.
+* text=auto eol=lf
+
+# Windows scripts need CRLF, POSIX scripts must stay LF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf
+
+# Binary assets
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.mp4  binary
+*.wav  binary
+*.pt   binary
+*.pth  binary
+*.ckpt binary
+*.npy  binary
+*.safetensors binary

@@ -1,0 +1,14 @@
+# Optional extras, not needed for KeySync inference or training.
+#
+# On Windows these have no prebuilt wheels and are built from source, which
+# needs the Visual Studio Build Tools (C++) and CMake. Install only if you
+# need them:  python -m pip install -r requirements-optional.txt
+#
+# insightface: only for FaceEmbeddings(face_type="insightface"), the default
+#              face_type="facenet" path is pure PyTorch and needs nothing.
+# dlib / face-recognition: used by external evaluation tooling only.
+
+dlib==19.24.6
+face-recognition==1.3.0
+face_recognition_models==0.3.0
+insightface==0.7.3

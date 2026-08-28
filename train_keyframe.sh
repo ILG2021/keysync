@@ -3,7 +3,7 @@ workers=${2:-6}
 batch_size=${3:-1}
 devices=${4:-1}
 echo "Training with $filelist, $workers, $batch_size, $devices"
-python main.py --base configs/example_training/keyframes/keyframes_dub.yaml --wandb True lightning.trainer.num_nodes 1 \
+python main.py --base configs/example_training/keyframes/keyframes_dub.yaml --wandb True lightning.trainer.num_nodes=1 \
     lightning.strategy=deepspeed_stage_1 lightning.trainer.precision=32 model.base_learning_rate=1.e-5 \
     data.params.train.datapipeline.filelist=$filelist \
     data.params.train.datapipeline.video_folder=video_crop  \

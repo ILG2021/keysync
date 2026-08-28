@@ -7,7 +7,7 @@ from landmarks_extractor import LandmarksExtractor
 
 
 def process_video(video_path, landmarks_extractor, output_dir, batch_size=32):
-    video_parent_dir = os.path.dirname(video_path).split("/")[-1]
+    video_parent_dir = os.path.basename(os.path.dirname(video_path))
 
     # Get video name without extension
     output_path = video_path.replace(video_parent_dir, output_dir).replace(

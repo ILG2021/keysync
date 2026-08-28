@@ -1,7 +1,7 @@
 import logging
 import math
 from inspect import isfunction
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -12,48 +12,10 @@ from torch.utils.checkpoint import checkpoint
 
 logpy = logging.getLogger(__name__)
 
-if version.parse(torch.__version__) >= version.parse("2.0.0"):
-    SDP_IS_AVAILABLE = True
-    from torch.backends.cuda import SDPBackend, sdp_kernel
+from .sdpa import SDPA_IS_AVAILABLE, SDPBackend, sdpa_backend_context
 
-    BACKEND_MAP = {
-        SDPBackend.MATH: {
-            "enable_math": True,
-            "enable_flash": False,
-            "enable_mem_efficient": False,
-        },
-        SDPBackend.FLASH_ATTENTION: {
-            "enable_math": False,
-            "enable_flash": True,
-            "enable_mem_efficient": False,
-        },
-        SDPBackend.EFFICIENT_ATTENTION: {
-            "enable_math": False,
-            "enable_flash": False,
-            "enable_mem_efficient": True,
-        },
-        None: {"enable_math": True, "enable_flash": True, "enable_mem_efficient": True},
-    }
-else:
-    from contextlib import nullcontext
-
-    SDP_IS_AVAILABLE = False
-    sdp_kernel = nullcontext
-    BACKEND_MAP = {}
-    logpy.warn(
-        f"No SDP backend available, likely because you are running in pytorch "
-        f"versions < 2.0. In fact, you are using PyTorch {torch.__version__}. "
-        f"You might want to consider upgrading."
-    )
-
-try:
-    import xformers
-    import xformers.ops
-
-    XFORMERS_IS_AVAILABLE = True
-except:
-    XFORMERS_IS_AVAILABLE = False
-    logpy.warn("no module 'xformers'. Processing without...")
+# Alias kept so code that used to check for the SDP backend keeps working.
+SDP_IS_AVAILABLE = SDPA_IS_AVAILABLE
 
 # from .diffusionmodules.util import mixed_checkpoint as checkpoint
 
@@ -152,7 +114,7 @@ class LinearAttention(nn.Module):
 
 
 class SelfAttention(nn.Module):
-    ATTENTION_MODES = ("xformers", "torch", "math")
+    ATTENTION_MODES = ("sdpa", "xformers", "torch", "math")
 
     def __init__(
         self,
@@ -162,7 +124,7 @@ class SelfAttention(nn.Module):
         qk_scale: Optional[float] = None,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
-        attn_mode: str = "xformers",
+        attn_mode: str = "sdpa",
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -174,7 +136,8 @@ class SelfAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         assert attn_mode in self.ATTENTION_MODES
-        self.attn_mode = attn_mode
+        # "xformers" is a deprecated alias kept for old configs.
+        self.attn_mode = "sdpa" if attn_mode == "xformers" else attn_mode
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, C = x.shape
@@ -187,11 +150,12 @@ class SelfAttention(nn.Module):
             q, k, v = qkv[0], qkv[1], qkv[2]  # B H L D
             x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
             x = rearrange(x, "B H L D -> B L (H D)")
-        elif self.attn_mode == "xformers":
-            qkv = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
-            q, k, v = qkv[0], qkv[1], qkv[2]  # B L H D
-            x = xformers.ops.memory_efficient_attention(q, k, v)
-            x = rearrange(x, "B L H D -> B L (H D)", H=self.num_heads)
+        elif self.attn_mode == "sdpa":
+            qkv = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+            q, k, v = qkv[0], qkv[1], qkv[2]  # B H L D
+            with sdpa_backend_context():
+                x = F.scaled_dot_product_attention(q, k, v)
+            x = rearrange(x, "B H L D -> B L (H D)", H=self.num_heads)
         elif self.attn_mode == "math":
             qkv = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
             q, k, v = qkv[0], qkv[1], qkv[2]  # B H L D
@@ -343,7 +307,7 @@ class CrossAttention(nn.Module):
 
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
 
-        with sdp_kernel(**BACKEND_MAP[self.backend]):
+        with sdpa_backend_context(self.backend):
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
         out = rearrange(out, "b h n d -> b n (h d)", h=h)
@@ -361,8 +325,13 @@ class CrossAttention(nn.Module):
         return self.to_out(combined_out)
 
 
-class MemoryEfficientCrossAttention(nn.Module):
-    # https://github.com/MatthieuTPHR/diffusers/blob/d80b531ff8060ec1ea982b65a1b8df70f73aa67c/src/diffusers/models/attention.py#L223
+class SDPACrossAttention(nn.Module):
+    """Cross attention backed by torch scaled_dot_product_attention.
+
+    Same module layout (and therefore the same state dict) as the former
+    xformers-based implementation.
+    """
+
     def __init__(
         self,
         query_dim,
@@ -372,6 +341,7 @@ class MemoryEfficientCrossAttention(nn.Module):
         dropout=0.0,
         use_reference=False,
         extra_linear=False,
+        backend=None,
         **kwargs,
     ):
         super().__init__()
@@ -401,7 +371,7 @@ class MemoryEfficientCrossAttention(nn.Module):
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)
         )
-        self.attention_op: Optional[Any] = None
+        self.backend = backend
 
     def forward(
         self,
@@ -479,50 +449,26 @@ class MemoryEfficientCrossAttention(nn.Module):
 
         b, _, _ = q.shape
         q, k, v = map(
-            lambda t: t.unsqueeze(3)
-            .reshape(b, t.shape[1], self.heads, self.dim_head)
+            lambda t: t.reshape(b, t.shape[1], self.heads, self.dim_head)
             .permute(0, 2, 1, 3)
-            .reshape(b * self.heads, t.shape[1], self.dim_head)
             .contiguous(),
             (q, k, v),
-        )
+        )  # b, heads, tokens, dim_head
         if q.dtype != k.dtype:
             k = k.to(q.dtype)
             v = v.to(q.dtype)
 
-        # actually compute the attention, what we cannot get enough of
-        if version.parse(xformers.__version__) >= version.parse("0.0.21"):
-            # NOTE: workaround for
-            # https://github.com/facebookresearch/xformers/issues/845
-            max_bs = 32768
-            N = q.shape[0]
-            n_batches = math.ceil(N / max_bs)
-            out = list()
-            for i_batch in range(n_batches):
-                batch = slice(i_batch * max_bs, (i_batch + 1) * max_bs)
-                out.append(
-                    xformers.ops.memory_efficient_attention(
-                        q[batch],
-                        k[batch],
-                        v[batch],
-                        attn_bias=None,
-                        op=self.attention_op,
-                    )
-                )
-            out = torch.cat(out, 0)
-        else:
-            out = xformers.ops.memory_efficient_attention(
-                q, k, v, attn_bias=None, op=self.attention_op
-            )
-
         # TODO: Use this directly in the attention operation, as a bias
         if exists(mask):
             raise NotImplementedError
-        out = (
-            out.unsqueeze(0)
-            .reshape(b, self.heads, out.shape[1], self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b, out.shape[1], self.heads * self.dim_head)
+
+        # actually compute the attention, what we cannot get enough of
+        with sdpa_backend_context(self.backend):
+            out = F.scaled_dot_product_attention(q, k, v)
+
+        n_tokens = out.shape[2]
+        out = out.permute(0, 2, 1, 3).reshape(
+            b, n_tokens, self.heads * self.dim_head
         )
         # Combine skip and non-skip results
         combined_out = torch.zeros(
@@ -540,10 +486,15 @@ class MemoryEfficientCrossAttention(nn.Module):
         return self.to_out(combined_out)
 
 
+# Deprecated alias: the xformers implementation is gone, SDPA replaces it.
+MemoryEfficientCrossAttention = SDPACrossAttention
+
+
 class BasicTransformerBlock(nn.Module):
     ATTENTION_MODES = {
         "softmax": CrossAttention,  # vanilla attention
-        "softmax-xformers": MemoryEfficientCrossAttention,  # ampere
+        "softmax-sdpa": SDPACrossAttention,  # torch scaled_dot_product_attention
+        "softmax-xformers": SDPACrossAttention,  # deprecated alias of softmax-sdpa
     }
 
     def __init__(
@@ -562,26 +513,16 @@ class BasicTransformerBlock(nn.Module):
     ):
         super().__init__()
         assert attn_mode in self.ATTENTION_MODES
-        if attn_mode != "softmax" and not XFORMERS_IS_AVAILABLE:
-            logpy.warn(
-                f"Attention mode '{attn_mode}' is not available. Falling "
-                f"back to native attention. This is not a problem in "
-                f"Pytorch >= 2.0. FYI, you are running with PyTorch "
-                f"version {torch.__version__}."
+        if attn_mode == "softmax-xformers":
+            logpy.debug(
+                "Attention mode 'softmax-xformers' is deprecated, using "
+                "'softmax-sdpa' (torch scaled_dot_product_attention) instead."
             )
-            attn_mode = "softmax"
-        elif attn_mode == "softmax" and not SDP_IS_AVAILABLE:
-            logpy.warn(
-                "We do not support vanilla attention anymore, as it is too "
-                "expensive. Sorry."
-            )
-            if not XFORMERS_IS_AVAILABLE:
-                assert False, (
-                    "Please install xformers via e.g. 'pip install xformers==0.0.16'"
-                )
-            else:
-                logpy.info("Falling back to xformers efficient attention.")
-                attn_mode = "softmax-xformers"
+            attn_mode = "softmax-sdpa"
+        assert SDP_IS_AVAILABLE, (
+            f"Attention requires torch.nn.functional.scaled_dot_product_attention, "
+            f"i.e. PyTorch >= 2.0. You are running PyTorch {torch.__version__}."
+        )
         attn_cls = self.ATTENTION_MODES[attn_mode]
         if version.parse(torch.__version__) >= version.parse("2.0.0"):
             assert sdp_backend is None or isinstance(sdp_backend, SDPBackend)
@@ -703,8 +644,8 @@ class BasicTransformerBlock(nn.Module):
 class BasicTransformerSingleLayerBlock(nn.Module):
     ATTENTION_MODES = {
         "softmax": CrossAttention,  # vanilla attention
-        "softmax-xformers": MemoryEfficientCrossAttention,  # on the A100s not quite as fast as the above version
-        # (todo might depend on head_dim, check, falls back to semi-optimized kernels for dim!=[16,32,64,128])
+        "softmax-sdpa": SDPACrossAttention,  # torch scaled_dot_product_attention
+        "softmax-xformers": SDPACrossAttention,  # deprecated alias of softmax-sdpa
     }
 
     def __init__(
@@ -874,7 +815,7 @@ class SimpleTransformer(nn.Module):
                     dim_head,
                     dropout=dropout,
                     context_dim=context_dim,
-                    attn_mode="softmax-xformers",
+                    attn_mode="softmax-sdpa",
                     checkpoint=checkpoint,
                 )
             )

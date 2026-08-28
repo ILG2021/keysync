@@ -1,14 +1,34 @@
 import os
+import sys
+
 import torch
 import torch.nn as nn
 from einops import rearrange
 from diffusers import AutoencoderKL, AutoencoderKLTemporalDecoder, StableDiffusionPipeline
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+from sgm.util import maybe_compile  # noqa: E402
+
+
+def enable_sdpa_attention(model):
+    """Run the diffusers attention blocks through torch scaled_dot_product_attention.
+
+    Replaces `set_use_memory_efficient_attention_xformers`, which requires
+    xformers (no Windows wheels). diffusers already defaults to this processor
+    on torch >= 2.0; setting it explicitly keeps the behaviour pinned.
+    """
+    try:
+        from diffusers.models.attention_processor import AttnProcessor2_0
+    except ImportError:  # very old diffusers, SDPA processor not available
+        return model
+    if hasattr(model, "set_attn_processor"):
+        model.set_attn_processor(AttnProcessor2_0())
+    return model
+
 
 def load_stable_model(model_path):
     vae_model = StableDiffusionPipeline.from_pretrained(model_path)
-    vae_model.set_use_memory_efficient_attention_xformers(True)
-    return vae_model.vae
+    return enable_sdpa_attention(vae_model.vae)
 
 
 class VaeWrapper(nn.Module):
@@ -23,7 +43,7 @@ class VaeWrapper(nn.Module):
         if latent_type == "stable":
             vae_model = load_stable_model("stabilityai/stable-diffusion-x4-upscaler")
             vae_model.enable_slicing()
-            vae_model.set_use_memory_efficient_attention_xformers(True)
+            enable_sdpa_attention(vae_model)
             self.down_factor = 4
         elif latent_type == "video":
             vae_model = AutoencoderKLTemporalDecoder.from_pretrained(
@@ -32,14 +52,14 @@ class VaeWrapper(nn.Module):
                 torch_dtype=torch.float16 if variant == "fp16" else torch.float32,
                 variant="fp16" if variant == "fp16" else None,
             )
-            vae_model.set_use_memory_efficient_attention_xformers(True)
+            enable_sdpa_attention(vae_model)
             self.down_factor = 8
         elif latent_type == "refiner":
             vae_model = AutoencoderKL.from_pretrained(
                 "stabilityai/stable-diffusion-xl-refiner-1.0", subfolder="vae", revision=None
             )
             vae_model.enable_slicing()
-            vae_model.set_use_memory_efficient_attention_xformers(True)
+            enable_sdpa_attention(vae_model)
             self.down_factor = 8
         elif latent_type == "ldm":
             assert False, "Not implemented"
@@ -52,7 +72,7 @@ class VaeWrapper(nn.Module):
         vae_model.requires_grad_(False)
         vae_model.cuda()
 
-        vae_model = torch.compile(vae_model)
+        vae_model = maybe_compile(vae_model)
         return vae_model
 
     # def accelerate_model(self, example_shape):

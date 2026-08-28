@@ -37,7 +37,9 @@ from ...util import (
 )
 
 from facenet_pytorch import MTCNN, InceptionResnetV1
-from insightface.app import FaceAnalysis
+
+# insightface is imported lazily: it has no prebuilt wheel on Windows and is
+# only needed by FaceEmbeddings(face_type="insightface").
 
 
 class AbstractEmbModel(nn.Module):
@@ -329,6 +331,15 @@ class FaceEmbeddings(AbstractEmbModel):
 
         self.face_type = face_type
         if face_type == "insightface":
+            try:
+                from insightface.app import FaceAnalysis
+            except ImportError as e:
+                raise ImportError(
+                    "face_type='insightface' needs the insightface package. On "
+                    "Windows it has to be built from source (Visual Studio Build "
+                    "Tools), or use face_type='facenet' instead."
+                ) from e
+
             self.app = FaceAnalysis(
                 name="buffalo_l",
                 providers=["CUDAExecutionProvider", "CPUExecutionProvider"],

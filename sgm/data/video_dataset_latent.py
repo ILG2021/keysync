@@ -136,6 +136,13 @@ class VideoDataset(Dataset):
             latent_folder if latent_folder is not None else video_folder
         )
         self.audio_in_video = audio_in_video
+        if self.audio_in_video and not hasattr(decord, "AVReader"):
+            # The Windows builds of decord are compiled without audio support.
+            raise RuntimeError(
+                "audio_in_video=True needs decord.AVReader, which is not available "
+                "in this decord build (the Windows wheels ship without audio "
+                "support). Use audio_in_video=False and separate .wav files."
+            )
 
         self.filelist = []
         self.audio_filelist = []
@@ -757,12 +764,14 @@ class VideoDataset(Dataset):
 
 
 if __name__ == "__main__":
+    import sys
+
     import torchvision.transforms as transforms
     import cv2
 
     transform = transforms.Compose(transforms=[transforms.Resize((256, 256))])
     dataset = VideoDataset(
-        "/vol/paramonos2/projects/antoni/datasets/mahnob/filelist_videos_val.txt",
+        sys.argv[1] if len(sys.argv) > 1 else "filelist_val.txt",
         transform=transform,
         num_frames=25,
     )

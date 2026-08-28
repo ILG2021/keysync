@@ -15,7 +15,8 @@ class TimeMixSequential(nn.Sequential):
 class VideoTransformerBlock(nn.Module):
     ATTENTION_MODES = {
         "softmax": CrossAttention,
-        "softmax-xformers": MemoryEfficientCrossAttention,
+        "softmax-sdpa": SDPACrossAttention,
+        "softmax-xformers": SDPACrossAttention,  # deprecated alias of softmax-sdpa
     }
 
     def __init__(

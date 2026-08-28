@@ -3,10 +3,9 @@ from typing import Callable, Iterable, Union
 import torch
 from einops import rearrange, repeat
 
-from sgm.modules.diffusionmodules.model import (XFORMERS_IS_AVAILABLE,
-                                                AttnBlock, Decoder,
-                                                MemoryEfficientAttnBlock,
-                                                ResnetBlock)
+from sgm.modules.diffusionmodules.model import (AttnBlock, Decoder,
+                                                SDPAAttnBlock, ResnetBlock)
+from sgm.modules.sdpa import SDPA_IS_AVAILABLE
 from sgm.modules.diffusionmodules.openaimodel import (ResBlock,
                                                       timestep_embedding)
 from sgm.modules.video_attention import VideoTransformerBlock
@@ -175,7 +174,7 @@ class VideoBlock(AttnBlock):
             raise NotImplementedError(f"unknown merge strategy {self.merge_strategy}")
 
 
-class MemoryEfficientVideoBlock(MemoryEfficientAttnBlock):
+class SDPAVideoBlock(SDPAAttnBlock):
     def __init__(
         self, in_channels: int, alpha: float = 0, merge_strategy: str = "learned"
     ):
@@ -187,7 +186,7 @@ class MemoryEfficientVideoBlock(MemoryEfficientAttnBlock):
             d_head=in_channels,
             checkpoint=False,
             ff_in=True,
-            attn_mode="softmax-xformers",
+            attn_mode="softmax-sdpa",
         )
 
         time_embed_dim = self.in_channels * 4
@@ -254,15 +253,19 @@ def make_time_attn(
 ):
     assert attn_type in [
         "vanilla",
+        "vanilla-sdpa",
         "vanilla-xformers",
     ], f"attn_type {attn_type} not supported for spatio-temporal attention"
+    if attn_type == "vanilla-xformers":
+        # Deprecated alias kept so older configs and checkpoints keep loading.
+        attn_type = "vanilla-sdpa"
     print(
         f"making spatial and temporal attention of type '{attn_type}' with {in_channels} in_channels"
     )
-    if not XFORMERS_IS_AVAILABLE and attn_type == "vanilla-xformers":
+    if not SDPA_IS_AVAILABLE and attn_type == "vanilla-sdpa":
         print(
-            f"Attention mode '{attn_type}' is not available. Falling back to vanilla attention. "
-            f"This is not a problem in Pytorch >= 2.0. FYI, you are running with PyTorch version {torch.__version__}"
+            f"Attention mode '{attn_type}' needs PyTorch >= 2.0, falling back to vanilla "
+            f"attention. You are running with PyTorch version {torch.__version__}"
         )
         attn_type = "vanilla"
 
@@ -271,10 +274,10 @@ def make_time_attn(
         return partialclass(
             VideoBlock, in_channels, alpha=alpha, merge_strategy=merge_strategy
         )
-    elif attn_type == "vanilla-xformers":
-        print(f"building MemoryEfficientAttnBlock with {in_channels} in_channels...")
+    elif attn_type == "vanilla-sdpa":
+        print(f"building SDPAVideoBlock with {in_channels} in_channels...")
         return partialclass(
-            MemoryEfficientVideoBlock,
+            SDPAVideoBlock,
             in_channels,
             alpha=alpha,
             merge_strategy=merge_strategy,
@@ -345,3 +348,7 @@ class VideoDecoder(Decoder):
             )
         else:
             return super()._make_resblock()
+
+
+# Deprecated alias kept for backwards compatibility.
+MemoryEfficientVideoBlock = SDPAVideoBlock
