@@ -36,6 +36,7 @@ import statistics
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -616,6 +617,7 @@ def main():
     print(f"[benchmark] models ready in {model_load_sec:.1f} s")
 
     rows = []
+    error_log = []
     for i, (video_path, audio_path) in enumerate(pairs, start=1):
         out_path = expected_output_path(args.output_folder, video_path, audio_path)
         row = {field: None for field in CSV_FIELDS}
@@ -667,7 +669,12 @@ def main():
         except Exception as e:  # keep going, record the failure
             row["status"] = "error"
             row["error"] = f"{type(e).__name__}: {e}"
+            tb = traceback.format_exc()
+            error_log.append(
+                f"### {video_path} + {audio_path}\n{tb}"
+            )
             print(f"[benchmark] FAILED: {row['error']}")
+            print(tb, file=sys.stderr)
             stop_after = args.fail_fast
         finally:
             row["runtime_sec"] = time.perf_counter() - start
@@ -707,6 +714,12 @@ def main():
                     for k, v in row.items()
                 }
             )
+
+    if error_log:
+        error_path = os.path.join(args.output_folder, "benchmark_errors.log")
+        with open(error_path, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(error_log))
+        print(f"\n[benchmark] full tracebacks written to {error_path}")
 
     summary = build_summary(rows, model_load_sec, args)
     summary_path = os.path.join(args.output_folder, "benchmark_summary.json")
