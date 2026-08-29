@@ -167,10 +167,6 @@ python -m pip uninstall omegaconf antlr4-python3-runtime -y
 python -m pip install "omegaconf==2.3.0" "antlr4-python3-runtime==4.9.3"
 ```
 
-- **Windows:** `torch.compile` needs Triton, which is not part of the official
-  Windows wheels, so it is skipped automatically. If you installed a Windows
-  build of Triton yourself, set `KEYSYNC_TORCH_COMPILE=1` to turn it back on.
-
 - **Windows:** DeepSpeed is Linux-only. The training scripts default to the
   `auto` strategy; pass `-Strategy ddp` for multi-GPU training (PyTorch
   Lightning then uses the gloo backend, since NCCL is Linux-only too).
@@ -183,10 +179,59 @@ python -m pip install "omegaconf==2.3.0" "antlr4-python3-runtime==4.9.3"
 
 ### Download Pretrained Models
 
+The KeySync checkpoints live on the Hugging Face Hub and have to be downloaded
+manually. Run this from the repository root:
+
 ```powershell
 git lfs install
 git clone https://huggingface.co/toninio19/keysync pretrained_models
 ```
+
+Without Git LFS you can use the Hugging Face CLI instead, which is already
+installed as part of `huggingface-hub`:
+
+```powershell
+huggingface-cli download toninio19/keysync --local-dir pretrained_models
+```
+
+Either way you should end up with:
+
+```
+pretrained_models\checkpoints\keyframe_dub.pt         # keyframe model
+pretrained_models\checkpoints\interpolation_dub.pt    # interpolation model
+pretrained_models\checkpoints\WavLM-Base+.pt          # audio encoder
+```
+
+Those three paths are the defaults every script expects; pass
+`-KeyframesCkpt` / `-InterpolationCkpt` (or `--wavlm_ckpt`) if you put them
+elsewhere.
+
+For the occlusion pipeline (`--fix_occlusion`) you also need the SAM 2
+checkpoint at `pretrained_models\checkpoints\sam2.1_hiera_large.pt`,
+downloaded from the [SAM 2 repository](https://github.com/facebookresearch/sam2).
+
+### Models downloaded automatically on first run
+
+Three more models are pulled from the Hub the first time you run inference and
+then cached in `%USERPROFILE%\.cache\huggingface` and `%USERPROFILE%\.cache\torch`:
+
+| Model | Used for |
+|-------|----------|
+| `facebook/hubert-base-ls960` | audio embeddings |
+| `stabilityai/stable-video-diffusion-img2vid` (VAE only) | video latents |
+| `face-alignment` s3fd + 2DFAN4 weights | facial landmarks |
+
+The Stable Video Diffusion repository is **gated**: accept its license on the
+[model page](https://huggingface.co/stabilityai/stable-video-diffusion-img2vid)
+while logged in, then authenticate locally, otherwise the first run fails with
+a 401/403:
+
+```powershell
+huggingface-cli login
+```
+
+So the first run needs an internet connection and is noticeably slower than the
+following ones.
 
 ## Quick Start Guide
 

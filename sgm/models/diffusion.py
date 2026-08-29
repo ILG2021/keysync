@@ -48,7 +48,6 @@ class DiffusionEngine(pl.LightningModule):
         log_keys: Union[List, None] = None,
         no_log_keys: Union[List, None] = None,
         no_cond_log: bool = False,
-        compile_model: bool = False,
         en_and_decode_n_samples_a_time: Optional[int] = None,
         only_train_ipadapter: Optional[bool] = False,
         to_unfreeze: Optional[List[str]] = [],
@@ -70,7 +69,7 @@ class DiffusionEngine(pl.LightningModule):
             optimizer_config, {"target": "torch.optim.AdamW"}
         )
         self.model = self.initialize_network(
-            network_config, network_wrapper, compile_model=compile_model
+            network_config, network_wrapper
         )
 
         self.denoiser = instantiate_from_config(denoiser_config)
@@ -182,7 +181,7 @@ class DiffusionEngine(pl.LightningModule):
             )
             karras_config = default(bad_model_config, network_config)
             bad_model = self.initialize_network(
-                karras_config, network_wrapper, compile_model=compile_model
+                karras_config, network_wrapper
             )
             state_dict = self.load_bad_model_weights(bad_model_path)
             bad_model.load_state_dict(state_dict)
@@ -199,18 +198,14 @@ class DiffusionEngine(pl.LightningModule):
                 new_dict["diffusion_model" + k.split("diffusion_model")[1]] = v
         return new_dict
 
-    def initialize_network(self, network_config, network_wrapper, compile_model=False):
+    def initialize_network(self, network_config, network_wrapper):
         model = instantiate_from_config(network_config)
         if isinstance(network_wrapper, str) or network_wrapper is None:
-            model = get_obj_from_str(default(network_wrapper, OPENAIUNETWRAPPER))(
-                model, compile_model=compile_model
-            )
+            model = get_obj_from_str(default(network_wrapper, OPENAIUNETWRAPPER))(model)
         else:
             target = network_wrapper["target"]
             params = network_wrapper.get("params", dict())
-            model = get_obj_from_str(target)(
-                model, compile_model=compile_model, **params
-            )
+            model = get_obj_from_str(target)(model, **params)
         return model
 
     def init_from_ckpt(

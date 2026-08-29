@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from packaging import version
 from einops import repeat, rearrange
 from diffusers.utils import _get_model_file
 from diffusers.models.modeling_utils import load_state_dict
@@ -13,15 +12,9 @@ OPENAIUNETWRAPPER = "sgm.modules.diffusionmodules.wrappers.OpenAIWrapper"
 
 
 class IdentityWrapper(nn.Module):
-    def __init__(self, diffusion_model, compile_model: bool = False):
+    def __init__(self, diffusion_model):
         super().__init__()
-        compile = (
-            torch.compile
-            if (version.parse(torch.__version__) >= version.parse("2.0.0"))
-            and compile_model
-            else lambda x: x
-        )
-        self.diffusion_model = compile(diffusion_model)
+        self.diffusion_model = diffusion_model
 
     def forward(self, *args, **kwargs):
         return self.diffusion_model(*args, **kwargs)
@@ -31,14 +24,13 @@ class OpenAIWrapper(IdentityWrapper):
     def __init__(
         self,
         diffusion_model,
-        compile_model: bool = False,
         ada_aug_percent=0.0,
         fix_image_leak=False,
         add_embeddings=False,
         im_size=[64, 64],
         n_channels=4,
     ):
-        super().__init__(diffusion_model, compile_model)
+        super().__init__(diffusion_model)
         self.fix_image_leak = fix_image_leak
         if fix_image_leak:
             self.beta_m = 15
@@ -121,8 +113,8 @@ class OpenAIWrapper(IdentityWrapper):
 
 
 class DubbingWrapper(IdentityWrapper):
-    def __init__(self, diffusion_model, compile_model: bool = False, mask_input=False):
-        super().__init__(diffusion_model, compile_model)
+    def __init__(self, diffusion_model, mask_input=False):
+        super().__init__(diffusion_model)
         self.mask_input = mask_input
 
     def forward(
@@ -154,7 +146,6 @@ class StabilityWrapper(IdentityWrapper):
     def __init__(
         self,
         diffusion_model,
-        compile_model: bool = False,
         use_ipadapter: bool = False,
         ipadapter_model: str = "ip-adapter_sd15.bin",
         adapter_scale: float = 1.0,
@@ -162,7 +153,7 @@ class StabilityWrapper(IdentityWrapper):
         skip_text_emb: bool = False,
         # pass_image_emb_to_hidden_states: bool = False,
     ):
-        super().__init__(diffusion_model, compile_model)
+        super().__init__(diffusion_model)
         self.use_ipadapter = use_ipadapter
         # self.pass_image_emb_to_hidden_states = pass_image_emb_to_hidden_states
 
@@ -231,14 +222,13 @@ class InterpolationWrapper(IdentityWrapper):
     def __init__(
         self,
         diffusion_model,
-        compile_model: bool = False,
         im_size=[512, 512],
         n_channels=4,
         starting_mask_method="zeros",
         add_mask=True,
         fix_image_leak=False,
     ):
-        super().__init__(diffusion_model, compile_model)
+        super().__init__(diffusion_model)
         im_size = [
             x // 8 for x in im_size
         ]  # 8 is the default downscaling factor in the vae model

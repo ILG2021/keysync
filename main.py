@@ -314,7 +314,7 @@ if __name__ == "__main__":
     cfgdir = os.path.join(logdir, "configs")
     seed_everything(opt.seed, workers=True)
 
-    # move before model init, in case a torch.compile(...) is called somewhere
+    # set before model init so the TF32 flags apply to everything built afterwards
     if opt.enable_tf32:
         # pt_version = version.parse(torch.__version__)
         torch.backends.cuda.matmul.allow_tf32 = True

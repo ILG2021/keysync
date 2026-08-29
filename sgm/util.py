@@ -18,32 +18,8 @@ import contextlib
 import io
 from functools import wraps
 import warnings
-from packaging import version
 
 IS_WINDOWS = sys.platform == "win32"
-
-
-def torch_compile_is_available() -> bool:
-    """Whether torch.compile can be used on this machine.
-
-    torch.compile needs Triton, which the official Windows wheels of PyTorch do
-    not ship, so compiling silently works until the first forward pass and then
-    raises. Set KEYSYNC_TORCH_COMPILE=1 to force it on anyway (e.g. if you
-    installed a Windows build of Triton yourself).
-    """
-    forced = os.environ.get("KEYSYNC_TORCH_COMPILE")
-    if forced is not None:
-        return forced.lower() not in ("0", "false", "no", "")
-    if IS_WINDOWS:
-        return False
-    return version.parse(torch.__version__) >= version.parse("2.0.0")
-
-
-def maybe_compile(model, **compile_kwargs):
-    """torch.compile(model) where supported, a no-op otherwise."""
-    if not torch_compile_is_available():
-        return model
-    return torch.compile(model, **compile_kwargs)
 
 
 def save_audio_video(

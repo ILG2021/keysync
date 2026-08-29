@@ -1,13 +1,9 @@
 import os
-import sys
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from diffusers import AutoencoderKL, AutoencoderKLTemporalDecoder, StableDiffusionPipeline
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from sgm.util import maybe_compile  # noqa: E402
 
 
 def enable_sdpa_attention(model):
@@ -72,12 +68,10 @@ class VaeWrapper(nn.Module):
         vae_model.requires_grad_(False)
         vae_model.cuda()
 
-        vae_model = maybe_compile(vae_model)
         return vae_model
 
     # def accelerate_model(self, example_shape):
     #     self.vae_model = torch.jit.trace(self.vae_model, torch.randn(example_shape).cuda())
-    #     self.vae_model = torch.compile(self.vae_model)
     #     self.is_accelerated = True
     def disable_slicing(self):
         self.vae_model.disable_slicing()
