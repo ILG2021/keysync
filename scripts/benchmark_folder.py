@@ -283,6 +283,17 @@ def load_models(pipeline, args):
     vae_model = pipeline.VaeWrapper("video")
     landmarks_model = pipeline.LandmarksExtractor()
 
+    from sgm.util import set_diffusion_precision
+
+    for engine in (model, model_keyframes):
+        set_diffusion_precision(engine, args.precision)
+
+    if args.cpu_offload:
+        # sample() pulls each model onto the GPU only while it is in use.
+        for offloaded in (model, model_keyframes, hubert_model, wavlm_model, vae_model):
+            offloaded.to("cpu")
+        torch.cuda.empty_cache()
+
     return {
         "model": model,
         "model_keyframes": model_keyframes,
@@ -338,6 +349,8 @@ def run_one(pipeline, models, args, video_path, audio_path):
         audio_emb_type=args.audio_emb_type,
         extra_naming=output_naming(video_path, audio_path)[0],
         what_mask=args.what_mask,
+        cpu_offload=args.cpu_offload,
+        precision=args.precision,
         recompute=not args.skip_existing,
         hubert_model=models["hubert_model"],
         wavlm_model=models["wavlm_model"],
@@ -571,6 +584,21 @@ def get_parser():
     run_group.add_argument("--seed", type=int, default=23)
     run_group.add_argument("--audio_emb_type", default="hubert")
     run_group.add_argument("--what_mask", default="box")
+    run_group.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="Offload models to CPU when idle: only the model that is currently "
+        "working stays on the GPU, the rest sit in system RAM. Lets the two "
+        "stage models fit in ~16 GB of VRAM, at the cost of a CPU<->GPU "
+        "transfer per chunk.",
+    )
+    run_group.add_argument(
+        "--precision",
+        choices=["fp32", "bf16", "fp16"],
+        default="fp32",
+        help="Precision for the UNet and conditioner (the VAE always stays "
+        "fp32). bf16 roughly halves their weights and is faster on Ada/Ampere.",
+    )
     run_group.add_argument(
         "--compute_until",
         default="end",

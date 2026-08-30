@@ -26,8 +26,11 @@ from scripts.util.video_to_latent import encode_video_chunk  # noqa
 from scripts.util.landmarks_extractor import LandmarksExtractor  # noqa
 
 from sgm.util import (  # noqa
+    amp_context,
     default,
     instantiate_from_config,
+    on_device,
+    set_diffusion_precision,
     get_raw_audio,
     save_audio_video,
     calculate_splits,
@@ -943,6 +946,8 @@ def sample(
     nose_index: int = 28,
     save_occlusion_mask: bool = False,
     recompute: bool = False,
+    cpu_offload: bool = False,
+    precision: str = "fp32",
     hubert_model: Optional[HubertModel] = None,
     wavlm_model: Optional[WavLM_wrapper] = None,
     vae_model: Optional[VaeWrapper] = None,
@@ -998,7 +1003,8 @@ def sample(
     original_len = video.shape[0]
     video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
 
-    video_emb = compute_video_embedding(video.permute(0, 2, 3, 1), vae_model)
+    with on_device(vae_model, device, offload=cpu_offload):
+        video_emb = compute_video_embedding(video.permute(0, 2, 3, 1), vae_model)
     # video_embedding_path = video_path.replace(".mp4", "_video_512_latent.safetensors")
     # if video_folder is not None and latent_folder is not None:
     #     video_embedding_path = video_embedding_path.replace(video_folder, latent_folder)
@@ -1015,9 +1021,12 @@ def sample(
             max_frames = max_frames + remainder
         print(f"Adjusted max_frames to {max_frames} to be a multiple of 14")
 
-    audio, audio_interpolation, raw_audio = get_audio_embeddings(
-        audio_path, 16000, hubert_model=hubert_model, wavlm_model=wavlm_model
-    )
+    with on_device(hubert_model, device, offload=cpu_offload), on_device(
+        wavlm_model, device, offload=cpu_offload
+    ):
+        audio, audio_interpolation, raw_audio = get_audio_embeddings(
+            audio_path, 16000, hubert_model=hubert_model, wavlm_model=wavlm_model
+        )
     landmarks = extract_video_landmarks(video, landmarks_model)
 
     video = (video / 255.0) * 2.0 - 1.0
@@ -1260,24 +1269,27 @@ def sample(
         chunk_masks_interpolation = masks_interpolation[start_idx:end_idx]
         gt_interpolation_chunks = gt_interpolation[start_idx:end_idx]
 
-        samples_z, samples_x = sample_keyframes(
-            model_keyframes,
-            chunk_audio_cond,
-            chunk_gt_keyframes,
-            chunk_masks,
-            condition.cuda(),
-            num_frames,
-            fps_id,
-            cond_aug,
-            device,
-            embbedings.cuda(),
-            force_uc_zero_embeddings,
-            n_batch_keyframes,
-            0,
-            strength,
-            None,
-            gt_as_cond=gt_as_cond,
-        )
+        with on_device(model_keyframes, device, offload=cpu_offload), amp_context(
+            precision, device
+        ):
+            samples_z, samples_x = sample_keyframes(
+                model_keyframes,
+                chunk_audio_cond,
+                chunk_gt_keyframes,
+                chunk_masks,
+                condition.cuda(),
+                num_frames,
+                fps_id,
+                cond_aug,
+                device,
+                embbedings.cuda(),
+                force_uc_zero_embeddings,
+                n_batch_keyframes,
+                0,
+                strength,
+                None,
+                gt_as_cond=gt_as_cond,
+            )
 
         if last_frame_x is not None:
             samples_x = torch.cat([last_frame_x.unsqueeze(0), samples_x], axis=0)
@@ -1286,27 +1298,30 @@ def sample(
         last_frame_x = samples_x[-1]
         last_frame_z = samples_z[-1]
 
-        vid = sample_interpolation(
-            model,
-            samples_z,
-            samples_x,
-            audio_interpolation_list_chunk,
-            gt_interpolation_chunks,
-            chunk_masks_interpolation,
-            condition.cuda(),
-            num_frames,
-            device,
-            overlap,
-            fps_id,
-            cond_aug,
-            force_uc_zero_embeddings,
-            n_batch,
-            chunk_size,
-            strength,
-            None,
-            cut_audio=extra_audio not in ["both", "interp"],
-            to_remove=to_remove_chunks_unwrapped,
-        )
+        with on_device(model, device, offload=cpu_offload), amp_context(
+            precision, device
+        ):
+            vid = sample_interpolation(
+                model,
+                samples_z,
+                samples_x,
+                audio_interpolation_list_chunk,
+                gt_interpolation_chunks,
+                chunk_masks_interpolation,
+                condition.cuda(),
+                num_frames,
+                device,
+                overlap,
+                fps_id,
+                cond_aug,
+                force_uc_zero_embeddings,
+                n_batch,
+                chunk_size,
+                strength,
+                None,
+                cut_audio=extra_audio not in ["both", "interp"],
+                to_remove=to_remove_chunks_unwrapped,
+            )
 
         if chunk_start == 0:
             complete_video = vid
@@ -1539,6 +1554,8 @@ def main(
     nose_index: int = 28,
     save_occlusion_mask: bool = False,
     recompute: bool = False,
+    cpu_offload: bool = False,
+    precision: str = "fp32",
 ) -> None:
     """
     Main function to run the dubbing pipeline.
@@ -1589,6 +1606,12 @@ def main(
         gt_as_cond: Whether to use ground truth as conditioning
         nose_index: Index of nose landmark
         save_occlusion_mask: Whether to save occlusion mask
+        cpu_offload: Offload models to CPU when idle. Only the model that is
+            currently working stays on the GPU, the others sit in system RAM,
+            which is what makes the two stage models fit in ~16 GB of VRAM.
+        precision: "fp32" (default), "bf16" or "fp16". Halves the UNet and
+            conditioner weights and runs them under autocast; the VAE stays in
+            fp32, as the configs ask for.
     """
     print("Scale: ", scale)
     num_frames = default(num_frames, 14)
@@ -1619,6 +1642,15 @@ def main(
     ).cuda()
     vae_model = VaeWrapper("video")
     landmarks_model = LandmarksExtractor()
+
+    for engine in (model, model_keyframes):
+        set_diffusion_precision(engine, precision)
+
+    if cpu_offload:
+        # sample() pulls each model onto the GPU only while it is in use.
+        for offloaded in (model, model_keyframes, hubert_model, wavlm_model, vae_model):
+            offloaded.to("cpu")
+        torch.cuda.empty_cache()
 
     if scale is not None:
         if len(scale) == 1:
@@ -1727,6 +1759,8 @@ def main(
                 nose_index=nose_index,
                 save_occlusion_mask=save_occlusion_mask,
                 recompute=recompute,
+                cpu_offload=cpu_offload,
+                precision=precision,
                 hubert_model=hubert_model,
                 wavlm_model=wavlm_model,
                 vae_model=vae_model,

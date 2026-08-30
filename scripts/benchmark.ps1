@@ -17,6 +17,10 @@
     # separate folders, cap each case at 20 seconds, one warm-up run
     .\scripts\benchmark.ps1 -VideoDir data\videos -AudioDir data\audios `
         -OutputFolder output -ComputeUntil 20 -Warmup 1
+
+.EXAMPLE
+    # 16 GB card: offload idle models to CPU, run the UNet in bf16
+    .\scripts\benchmark.ps1 -InputDir data\samples -CpuOffload -Precision bf16
 #>
 [CmdletBinding()]
 param(
@@ -30,6 +34,8 @@ param(
     [int]$Limit = 0,
     [switch]$SkipExisting,
     [switch]$FailFast,
+    [switch]$CpuOffload,
+    [ValidateSet("fp32", "bf16", "fp16")][string]$Precision = "fp32",
     [string]$KeyframesCkpt = "pretrained_models\checkpoints\keyframe_dub.pt",
     [string]$InterpolationCkpt = "pretrained_models\checkpoints\interpolation_dub.pt"
 )
@@ -48,6 +54,7 @@ try {
         "--pair_mode", $PairMode,
         "--compute_until", $ComputeUntil,
         "--warmup", $Warmup,
+        "--precision", $Precision,
         "--keyframes_ckpt", $KeyframesCkpt,
         "--interpolation_ckpt", $InterpolationCkpt
     )
@@ -57,6 +64,7 @@ try {
     if ($Limit -gt 0) { $arguments += @("--limit", $Limit) }
     if ($SkipExisting) { $arguments += "--skip_existing" }
     if ($FailFast) { $arguments += "--fail_fast" }
+    if ($CpuOffload) { $arguments += "--cpu_offload" }
 
     python @arguments
     if ($LASTEXITCODE -ne 0) { throw "benchmark_folder.py exited with code $LASTEXITCODE" }

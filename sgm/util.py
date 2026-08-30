@@ -22,6 +22,61 @@ import warnings
 IS_WINDOWS = sys.platform == "win32"
 
 
+AMP_DTYPES = {"fp32": None, "bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def amp_context(precision="fp32", device="cuda"):
+    """autocast context for the given precision ("fp32" -> no-op)."""
+    dtype = AMP_DTYPES.get(precision)
+    if dtype is None or not str(device).startswith("cuda"):
+        return contextlib.nullcontext()
+    return torch.autocast("cuda", dtype=dtype)
+
+
+def set_diffusion_precision(model, precision="fp32"):
+    """Cast a DiffusionEngine's UNet and conditioner, leaving the VAE in fp32.
+
+    The sampling configs set `disable_first_stage_autocast: True`, i.e. the
+    authors want the VAE encode/decode to stay in fp32 for quality. Casting
+    `first_stage_model` too would then feed fp32 activations into half-precision
+    weights outside of autocast and raise. Halving only the UNet and the
+    conditioner is what sgm/inference/api.py already does.
+
+    Returns the model, unchanged for precision="fp32".
+    """
+    dtype = AMP_DTYPES.get(precision)
+    if dtype is None:
+        return model
+    model.model.to(dtype)
+    if getattr(model, "conditioner", None) is not None:
+        model.conditioner.to(dtype)
+    return model
+
+
+@contextlib.contextmanager
+def on_device(module, device, offload=True, offload_device="cpu"):
+    """Run a block with `module` on `device`, then park it on `offload_device`.
+
+    KeySync keeps two full diffusion models alive (keyframes and
+    interpolation), each with its own VAE decoder. Holding both in VRAM needs
+    more than a 16 GB card has, so with `offload=True` only the model that is
+    currently working stays on the GPU. With `offload=False` the module is
+    moved to `device` and simply left there.
+    """
+    if module is None:
+        yield module
+        return
+
+    module.to(device)
+    try:
+        yield module
+    finally:
+        if offload:
+            module.to(offload_device)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
 def save_audio_video(
     video,
     audio=None,
