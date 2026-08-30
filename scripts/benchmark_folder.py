@@ -351,6 +351,7 @@ def run_one(pipeline, models, args, video_path, audio_path):
         what_mask=args.what_mask,
         cpu_offload=args.cpu_offload,
         precision=args.precision,
+        paste_back=args.paste_back,
         recompute=not args.skip_existing,
         hubert_model=models["hubert_model"],
         wavlm_model=models["wavlm_model"],
@@ -598,6 +599,13 @@ def get_parser():
         default="fp32",
         help="Precision for the UNet and conditioner (the VAE always stays "
         "fp32). bf16 roughly halves their weights and is faster on Ada/Ampere.",
+    )
+    run_group.add_argument(
+        "--paste_back",
+        action="store_true",
+        help="Crop a square around the face, animate it, then paste the result "
+        "back into the original frames. Keeps the input resolution and framing; "
+        "without it non-square video is squashed into 512x512.",
     )
     run_group.add_argument(
         "--compute_until",

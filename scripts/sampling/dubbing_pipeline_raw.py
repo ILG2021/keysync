@@ -24,6 +24,7 @@ from scripts.util.audio.WavLM import WavLM_wrapper  # noqa
 from scripts.util.vae_wrapper import VaeWrapper  # noqa
 from scripts.util.video_to_latent import encode_video_chunk  # noqa
 from scripts.util.landmarks_extractor import LandmarksExtractor  # noqa
+from scripts.util.video_processor import VideoPreProcessor  # noqa
 
 from sgm.util import (  # noqa
     amp_context,
@@ -884,6 +885,62 @@ def compute_video_embedding(video_frames, vae_model):
     return encoded
 
 
+def crop_face_region(video, landmarks, resize_size=512, crop_scale_factor=2):
+    """Crop one stable square around the face and resize it to `resize_size`.
+
+    Reuses the same VideoPreProcessor that scripts/util/crop_video.py applies
+    offline, with crop_type="union" so the whole clip shares a single box: no
+    per-frame jitter, and a single transform to invert when pasting back.
+
+    Returns (cropped_video, landmarks_in_crop_space, crop_box).
+    """
+    processor = VideoPreProcessor(
+        crop_scale_factor=crop_scale_factor,
+        crop_type="union",
+        resize_size=resize_size,
+    )
+    landmarks = np.asarray(landmarks)[:, :, :2].astype(float)
+    out = processor(video.float(), landmarks)
+    return out.video, np.asarray(out.landmarks), out.crop_data[0]
+
+
+def paste_faces_back(generated, original_frames, crop_box, feather=0.04):
+    """Put generated frames back into `crop_box` of the original frames.
+
+    `generated` is (t, c, size, size) uint8, `original_frames` is the untouched
+    (t, c, H, W) uint8 video. The generated crop is resized back to the box and
+    alpha-blended over it, with a soft border `feather` (as a fraction of the
+    box) so the seam does not show.
+    """
+    n = min(len(generated), len(original_frames))
+    x0, y0 = int(crop_box.x_start), int(crop_box.y_start)
+    x1, y1 = int(crop_box.x_end), int(crop_box.y_end)
+    box_h, box_w = y1 - y0, x1 - x0
+
+    gen = torch.from_numpy(np.asarray(generated[:n])).float()
+    gen = torch.nn.functional.interpolate(
+        gen, (box_h, box_w), mode="bilinear", align_corners=False
+    )
+
+    out = original_frames[:n].clone().float()
+    target = out[:, :, y0:y1, x0:x1]
+
+    ramp_y = torch.ones(box_h)
+    ramp_x = torch.ones(box_w)
+    pad_y, pad_x = int(box_h * feather), int(box_w * feather)
+    if pad_y > 0:
+        edge = torch.linspace(0.0, 1.0, pad_y)
+        ramp_y[:pad_y], ramp_y[-pad_y:] = edge, edge.flip(0)
+    if pad_x > 0:
+        edge = torch.linspace(0.0, 1.0, pad_x)
+        ramp_x[:pad_x], ramp_x[-pad_x:] = edge, edge.flip(0)
+    alpha = (ramp_y[:, None] * ramp_x[None, :])[None, None]
+
+    blended = alpha * gen + (1.0 - alpha) * target
+    out[:, :, y0:y1, x0:x1] = blended
+    return out.round().clamp(0, 255).to(torch.uint8).numpy()
+
+
 @torch.no_grad()
 def extract_video_landmarks(video_frames, landmarks_model):
     """Extract landmarks from video frames"""
@@ -948,6 +1005,7 @@ def sample(
     recompute: bool = False,
     cpu_offload: bool = False,
     precision: str = "fp32",
+    paste_back: bool = False,
     hubert_model: Optional[HubertModel] = None,
     wavlm_model: Optional[WavLM_wrapper] = None,
     vae_model: Optional[VaeWrapper] = None,
@@ -1001,7 +1059,21 @@ def sample(
 
     h, w = video.shape[2:]
     original_len = video.shape[0]
-    video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
+
+    original_frames, crop_box, landmarks = None, None, None
+    if paste_back:
+        # Landmarks come first here: they define the crop box, and cropping to a
+        # square keeps the face in its true proportions instead of stretching a
+        # portrait frame into 512x512.
+        original_frames = video.clone()
+        landmarks = extract_video_landmarks(video, landmarks_model)
+        video, landmarks, crop_box = crop_face_region(video, landmarks)
+        print(
+            f"Cropped face box x[{crop_box.x_start}:{crop_box.x_end}] "
+            f"y[{crop_box.y_start}:{crop_box.y_end}] out of {w}x{h}"
+        )
+    else:
+        video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
 
     with on_device(vae_model, device, offload=cpu_offload):
         video_emb = compute_video_embedding(video.permute(0, 2, 3, 1), vae_model)
@@ -1027,11 +1099,16 @@ def sample(
         audio, audio_interpolation, raw_audio = get_audio_embeddings(
             audio_path, 16000, hubert_model=hubert_model, wavlm_model=wavlm_model
         )
-    landmarks = extract_video_landmarks(video, landmarks_model)
+    if landmarks is None:
+        landmarks = extract_video_landmarks(video, landmarks_model)
 
     video = (video / 255.0) * 2.0 - 1.0
 
-    landmarks = scale_landmarks(landmarks[:, :, :2], (h, w), (512, 512))
+    # extract_video_landmarks() already ran on the 512x512 frames, so the
+    # coordinates are in that space. Rescaling them from the original (h, w)
+    # here would shift them a second time; it only happened to be a no-op for
+    # inputs that were already 512x512.
+    landmarks = landmarks[:, :, :2]
     if len(landmarks) < len(audio):
         # Repeat last landmark
         landmarks = np.concatenate(
@@ -1328,6 +1405,11 @@ def sample(
         else:
             complete_video = np.concatenate([complete_video[:-1], vid], axis=0)
 
+    if paste_back:
+        complete_video = paste_faces_back(
+            complete_video, original_frames, crop_box
+        )
+
     if raw_audio is not None:
         complete_audio = rearrange(
             raw_audio[: complete_video.shape[0]], "f s -> () (f s)"
@@ -1556,6 +1638,7 @@ def main(
     recompute: bool = False,
     cpu_offload: bool = False,
     precision: str = "fp32",
+    paste_back: bool = False,
 ) -> None:
     """
     Main function to run the dubbing pipeline.
@@ -1612,6 +1695,9 @@ def main(
         precision: "fp32" (default), "bf16" or "fp16". Halves the UNet and
             conditioner weights and runs them under autocast; the VAE stays in
             fp32, as the configs ask for.
+        paste_back: Crop a square around the face, animate that, then paste the
+            result back into the original frames. Keeps the input resolution and
+            framing, instead of squashing non-square video into 512x512.
     """
     print("Scale: ", scale)
     num_frames = default(num_frames, 14)
@@ -1761,6 +1847,7 @@ def main(
                 recompute=recompute,
                 cpu_offload=cpu_offload,
                 precision=precision,
+                paste_back=paste_back,
                 hubert_model=hubert_model,
                 wavlm_model=wavlm_model,
                 vae_model=vae_model,

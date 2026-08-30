@@ -21,6 +21,10 @@
 .EXAMPLE
     # 16 GB card: offload idle models to CPU, run the UNet in bf16
     .\scripts\benchmark.ps1 -InputDir data\samples -CpuOffload -Precision bf16
+
+.EXAMPLE
+    # portrait input: keep the original framing instead of squashing to square
+    .\scripts\benchmark.ps1 -InputDir data\samples -PasteBack
 #>
 [CmdletBinding()]
 param(
@@ -35,6 +39,7 @@ param(
     [switch]$SkipExisting,
     [switch]$FailFast,
     [switch]$CpuOffload,
+    [switch]$PasteBack,
     [ValidateSet("fp32", "bf16", "fp16")][string]$Precision = "fp32",
     [string]$KeyframesCkpt = "pretrained_models\checkpoints\keyframe_dub.pt",
     [string]$InterpolationCkpt = "pretrained_models\checkpoints\interpolation_dub.pt"
@@ -65,6 +70,7 @@ try {
     if ($SkipExisting) { $arguments += "--skip_existing" }
     if ($FailFast) { $arguments += "--fail_fast" }
     if ($CpuOffload) { $arguments += "--cpu_offload" }
+    if ($PasteBack) { $arguments += "--paste_back" }
 
     python @arguments
     if ($LASTEXITCODE -ne 0) { throw "benchmark_folder.py exited with code $LASTEXITCODE" }
