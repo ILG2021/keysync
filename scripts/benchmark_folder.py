@@ -604,8 +604,8 @@ def get_parser():
         "--paste_back",
         action="store_true",
         help="Crop a square around the face, animate it, then paste the result "
-        "back into the original frames. Keeps the input resolution and framing; "
-        "without it non-square video is squashed into 512x512.",
+        "back into the original frames. Non-square input uses this behavior "
+        "automatically; this flag also enables it for square input.",
     )
     run_group.add_argument(
         "--compute_until",

@@ -23,7 +23,8 @@
     .\scripts\benchmark.ps1 -InputDir data\samples -CpuOffload -Precision bf16
 
 .EXAMPLE
-    # portrait input: keep the original framing instead of squashing to square
+    # Portrait input keeps its framing automatically. For square input,
+    # -PasteBack can still be used to animate only the face crop.
     .\scripts\benchmark.ps1 -InputDir data\samples -PasteBack
 #>
 [CmdletBinding()]

@@ -24,7 +24,7 @@ from scripts.util.audio.WavLM import WavLM_wrapper  # noqa
 from scripts.util.vae_wrapper import VaeWrapper  # noqa
 from scripts.util.video_to_latent import encode_video_chunk  # noqa
 from scripts.util.landmarks_extractor import LandmarksExtractor  # noqa
-from scripts.util.video_processor import VideoPreProcessor  # noqa
+from scripts.util.video_processor import CropData, VideoPreProcessor  # noqa
 
 from sgm.util import (  # noqa
     amp_context,
@@ -885,6 +885,37 @@ def compute_video_embedding(video_frames, vae_model):
     return encoded
 
 
+def square_box_inside_frame(box, height, width):
+    """Force a crop box to be square and fully inside the frame.
+
+    VideoPreProcessor._recalculate_crop re-centres the box when it runs past an
+    edge but does not clamp again afterwards, so a face near the border (or a
+    box larger than the short side) can come back non-square or out of bounds.
+    Resizing such a box to 512x512 would squash the face all over again.
+    """
+    size = min(
+        int(box.x_end) - int(box.x_start),
+        int(box.y_end) - int(box.y_start),
+        height,
+        width,
+    )
+    size = max(size, 1)
+
+    centre_x = (int(box.x_start) + int(box.x_end)) / 2
+    centre_y = (int(box.y_start) + int(box.y_end)) / 2
+    x_start = int(round(centre_x - size / 2))
+    y_start = int(round(centre_y - size / 2))
+    x_start = max(0, min(x_start, width - size))
+    y_start = max(0, min(y_start, height - size))
+
+    return CropData(
+        x_start=x_start,
+        y_start=y_start,
+        x_end=x_start + size,
+        y_end=y_start + size,
+    )
+
+
 def crop_face_region(video, landmarks, resize_size=512, crop_scale_factor=2):
     """Crop one stable square around the face and resize it to `resize_size`.
 
@@ -900,8 +931,21 @@ def crop_face_region(video, landmarks, resize_size=512, crop_scale_factor=2):
         resize_size=resize_size,
     )
     landmarks = np.asarray(landmarks)[:, :, :2].astype(float)
-    out = processor(video.float(), landmarks)
-    return out.video, np.asarray(out.landmarks), out.crop_data[0]
+    height, width = video.shape[2], video.shape[3]
+
+    processor_out = processor(video.float(), landmarks)
+    box = square_box_inside_frame(processor_out.crop_data[0], height, width)
+
+    # Re-crop with the normalised box rather than trusting the processor output,
+    # so the tensor and the landmarks always match a square, in-bounds region.
+    cropped = video.float()[:, :, box.y_start : box.y_end, box.x_start : box.x_end]
+    scale = resize_size / (box.y_end - box.y_start)
+    cropped = torch.nn.functional.interpolate(
+        cropped, (resize_size, resize_size), mode="bilinear", align_corners=False
+    )
+    cropped_landmarks = (landmarks - np.array([box.x_start, box.y_start])) * scale
+
+    return cropped, cropped_landmarks, box
 
 
 def paste_faces_back(generated, original_frames, crop_box, feather=0.04):
@@ -1060,17 +1104,24 @@ def sample(
     h, w = video.shape[2:]
     original_len = video.shape[0]
 
+    # The models operate on a square face crop. Preserve every non-square
+    # source automatically so a portrait/landscape input is not saved as a
+    # stretched 512x512 video. ``paste_back`` still selects this path for a
+    # source that is already square.
+    preserve_framing = paste_back or h != w
     original_frames, crop_box, landmarks = None, None, None
-    if paste_back:
+    if preserve_framing:
         # Landmarks come first here: they define the crop box, and cropping to a
         # square keeps the face in its true proportions instead of stretching a
         # portrait frame into 512x512.
         original_frames = video.clone()
         landmarks = extract_video_landmarks(video, landmarks_model)
         video, landmarks, crop_box = crop_face_region(video, landmarks)
+        mode = "Automatically preserving" if not paste_back else "Preserving"
         print(
-            f"Cropped face box x[{crop_box.x_start}:{crop_box.x_end}] "
-            f"y[{crop_box.y_start}:{crop_box.y_end}] out of {w}x{h}"
+            f"{mode} {w}x{h} output framing; cropped face box "
+            f"x[{crop_box.x_start}:{crop_box.x_end}] "
+            f"y[{crop_box.y_start}:{crop_box.y_end}]"
         )
     else:
         video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
@@ -1405,7 +1456,7 @@ def sample(
         else:
             complete_video = np.concatenate([complete_video[:-1], vid], axis=0)
 
-    if paste_back:
+    if preserve_framing:
         complete_video = paste_faces_back(
             complete_video, original_frames, crop_box
         )
@@ -1696,8 +1747,9 @@ def main(
             conditioner weights and runs them under autocast; the VAE stays in
             fp32, as the configs ask for.
         paste_back: Crop a square around the face, animate that, then paste the
-            result back into the original frames. Keeps the input resolution and
-            framing, instead of squashing non-square video into 512x512.
+            result back into the original frames. Non-square videos use this
+            behavior automatically so their original resolution and aspect ratio
+            are always preserved; this option also enables it for square videos.
     """
     print("Scale: ", scale)
     num_frames = default(num_frames, 14)
