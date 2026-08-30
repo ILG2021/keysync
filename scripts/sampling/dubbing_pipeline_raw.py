@@ -24,7 +24,7 @@ from scripts.util.audio.WavLM import WavLM_wrapper  # noqa
 from scripts.util.vae_wrapper import VaeWrapper  # noqa
 from scripts.util.video_to_latent import encode_video_chunk  # noqa
 from scripts.util.landmarks_extractor import LandmarksExtractor  # noqa
-from scripts.util.video_processor import CropData, VideoPreProcessor  # noqa
+from scripts.util.video_processor import VideoPreProcessor  # noqa
 
 from sgm.util import (  # noqa
     amp_context,
@@ -885,104 +885,91 @@ def compute_video_embedding(video_frames, vae_model):
     return encoded
 
 
-def square_box_inside_frame(box, height, width):
-    """Force a crop box to be square and fully inside the frame.
+def letterbox_video(video, size=512):
+    """Fit TCHW frames inside a square preview without changing aspect ratio.
 
-    VideoPreProcessor._recalculate_crop re-centres the box when it runs past an
-    edge but does not clamp again afterwards, so a face near the border (or a
-    box larger than the short side) can come back non-square or out of bounds.
-    Resizing such a box to 512x512 would squash the face all over again.
+    This preview is used only for landmark detection; diffusion receives the
+    training-style face crop. Returns the padded tensor and content rectangle
+    (top, bottom, left, right) in preview coordinates.
     """
-    size = min(
-        int(box.x_end) - int(box.x_start),
-        int(box.y_end) - int(box.y_start),
-        height,
-        width,
+    height, width = video.shape[2:]
+    scale = size / max(height, width)
+    scaled_height = max(2, min(size, int(round(height * scale))))
+    scaled_width = max(2, min(size, int(round(width * scale))))
+
+    # H.264 is happiest with even output dimensions.  The long side remains
+    # exactly 512 while the short side is rounded down by at most one pixel.
+    if scaled_height < size:
+        scaled_height -= scaled_height % 2
+    if scaled_width < size:
+        scaled_width -= scaled_width % 2
+
+    resized = torch.nn.functional.interpolate(
+        video,
+        (scaled_height, scaled_width),
+        mode="bilinear",
+        align_corners=False,
     )
-    size = max(size, 1)
-
-    centre_x = (int(box.x_start) + int(box.x_end)) / 2
-    centre_y = (int(box.y_start) + int(box.y_end)) / 2
-    x_start = int(round(centre_x - size / 2))
-    y_start = int(round(centre_y - size / 2))
-    x_start = max(0, min(x_start, width - size))
-    y_start = max(0, min(y_start, height - size))
-
-    return CropData(
-        x_start=x_start,
-        y_start=y_start,
-        x_end=x_start + size,
-        y_end=y_start + size,
+    pad_y = size - scaled_height
+    pad_x = size - scaled_width
+    top, left = pad_y // 2, pad_x // 2
+    bottom, right = pad_y - top, pad_x - left
+    padded = torch.nn.functional.pad(
+        resized, (left, right, top, bottom), mode="replicate"
     )
+    return padded, (top, top + scaled_height, left, left + scaled_width)
 
 
-def crop_face_region(video, landmarks, resize_size=512, crop_scale_factor=2):
-    """Crop one stable square around the face and resize it to `resize_size`.
+def paste_faces_back_per_frame(generated, original_frames, crop_boxes, feather=0.04):
+    """Paste training-style per-frame crops back without a full-frame float copy.
 
-    Reuses the same VideoPreProcessor that scripts/util/crop_video.py applies
-    offline, with crop_type="union" so the whole clip shares a single box: no
-    per-frame jitter, and a single transform to invert when pasting back.
-
-    Returns (cropped_video, landmarks_in_crop_space, crop_box).
+    ``original_frames`` stays uint8 on the CPU. Only the current face region is
+    converted to float, which keeps GPU use independent of the source video
+    resolution and avoids the large host-memory spike of the old union-box path.
     """
-    processor = VideoPreProcessor(
-        crop_scale_factor=crop_scale_factor,
-        crop_type="union",
-        resize_size=resize_size,
-    )
-    landmarks = np.asarray(landmarks)[:, :, :2].astype(float)
-    height, width = video.shape[2], video.shape[3]
+    n = min(len(generated), len(original_frames), len(crop_boxes))
+    out = original_frames[:n].cpu().numpy()
+    cached_alpha_key = None
+    cached_alpha = None
 
-    processor_out = processor(video.float(), landmarks)
-    box = square_box_inside_frame(processor_out.crop_data[0], height, width)
+    for index, crop_box in enumerate(crop_boxes[:n]):
+        x0, y0 = int(crop_box.x_start), int(crop_box.y_start)
+        x1, y1 = int(crop_box.x_end), int(crop_box.y_end)
+        box_h, box_w = y1 - y0, x1 - x0
+        if box_h <= 0 or box_w <= 0:
+            raise ValueError(f"Invalid crop box at frame {index}: {crop_box}")
 
-    # Re-crop with the normalised box rather than trusting the processor output,
-    # so the tensor and the landmarks always match a square, in-bounds region.
-    cropped = video.float()[:, :, box.y_start : box.y_end, box.x_start : box.x_end]
-    scale = resize_size / (box.y_end - box.y_start)
-    cropped = torch.nn.functional.interpolate(
-        cropped, (resize_size, resize_size), mode="bilinear", align_corners=False
-    )
-    cropped_landmarks = (landmarks - np.array([box.x_start, box.y_start])) * scale
+        generated_crop = torch.from_numpy(np.asarray(generated[index])).float()[None]
+        generated_crop = torch.nn.functional.interpolate(
+            generated_crop,
+            (box_h, box_w),
+            mode="bilinear",
+            align_corners=False,
+        )[0]
 
-    return cropped, cropped_landmarks, box
+        cache_key = (box_h, box_w)
+        if cache_key != cached_alpha_key:
+            ramp_y = torch.ones(box_h)
+            ramp_x = torch.ones(box_w)
+            pad_y, pad_x = int(box_h * feather), int(box_w * feather)
+            if pad_y > 0:
+                edge = torch.linspace(0.0, 1.0, pad_y)
+                ramp_y[:pad_y], ramp_y[-pad_y:] = edge, edge.flip(0)
+            if pad_x > 0:
+                edge = torch.linspace(0.0, 1.0, pad_x)
+                ramp_x[:pad_x], ramp_x[-pad_x:] = edge, edge.flip(0)
+            cached_alpha = (ramp_y[:, None] * ramp_x[None, :])[None]
+            cached_alpha_key = cache_key
 
+        original_crop = torch.from_numpy(out[index, :, y0:y1, x0:x1]).float()
+        blended = (
+            cached_alpha * generated_crop + (1.0 - cached_alpha) * original_crop
+        )
+        out[index, :, y0:y1, x0:x1] = (
+            blended.round().clamp(0, 255).to(torch.uint8).numpy()
+        )
 
-def paste_faces_back(generated, original_frames, crop_box, feather=0.04):
-    """Put generated frames back into `crop_box` of the original frames.
-
-    `generated` is (t, c, size, size) uint8, `original_frames` is the untouched
-    (t, c, H, W) uint8 video. The generated crop is resized back to the box and
-    alpha-blended over it, with a soft border `feather` (as a fraction of the
-    box) so the seam does not show.
-    """
-    n = min(len(generated), len(original_frames))
-    x0, y0 = int(crop_box.x_start), int(crop_box.y_start)
-    x1, y1 = int(crop_box.x_end), int(crop_box.y_end)
-    box_h, box_w = y1 - y0, x1 - x0
-
-    gen = torch.from_numpy(np.asarray(generated[:n])).float()
-    gen = torch.nn.functional.interpolate(
-        gen, (box_h, box_w), mode="bilinear", align_corners=False
-    )
-
-    out = original_frames[:n].clone().float()
-    target = out[:, :, y0:y1, x0:x1]
-
-    ramp_y = torch.ones(box_h)
-    ramp_x = torch.ones(box_w)
-    pad_y, pad_x = int(box_h * feather), int(box_w * feather)
-    if pad_y > 0:
-        edge = torch.linspace(0.0, 1.0, pad_y)
-        ramp_y[:pad_y], ramp_y[-pad_y:] = edge, edge.flip(0)
-    if pad_x > 0:
-        edge = torch.linspace(0.0, 1.0, pad_x)
-        ramp_x[:pad_x], ramp_x[-pad_x:] = edge, edge.flip(0)
-    alpha = (ramp_y[:, None] * ramp_x[None, :])[None, None]
-
-    blended = alpha * gen + (1.0 - alpha) * target
-    out[:, :, y0:y1, x0:x1] = blended
-    return out.round().clamp(0, 255).to(torch.uint8).numpy()
+    return out
 
 
 @torch.no_grad()
@@ -1003,6 +990,37 @@ def extract_video_landmarks(video_frames, landmarks_model):
     print(np.array(landmarks).shape)
 
     return np.array(landmarks)
+
+
+def preprocess_video_like_training(video, landmarks_model, resize_size=512):
+    """Apply the same face crop used by ``scripts/util/crop_video.py``.
+
+    Landmark detection runs on a small aspect-preserving preview to avoid a
+    source-resolution VRAM spike. Coordinates are then mapped back to the
+    source frames before the default VideoPreProcessor performs its training
+    crop (scale factor 2, per-frame smoothing, 512x512 output).
+    """
+    source_h, source_w = video.shape[2:]
+    preview, content_rect = letterbox_video(video, resize_size)
+    landmarks = extract_video_landmarks(preview, landmarks_model)[:, :, :2].astype(
+        float
+    )
+    del preview
+
+    top, bottom, left, right = content_rect
+    preview_h, preview_w = bottom - top, right - left
+    landmarks[:, :, 0] = (landmarks[:, :, 0] - left) * source_w / preview_w
+    landmarks[:, :, 1] = (landmarks[:, :, 1] - top) * source_h / preview_h
+    landmarks[:, :, 0] = np.clip(landmarks[:, :, 0], 0, source_w - 1)
+    landmarks[:, :, 1] = np.clip(landmarks[:, :, 1], 0, source_h - 1)
+
+    # Deliberately use the defaults: these are exactly what crop_video.py uses.
+    processor_out = VideoPreProcessor()(video, landmarks)
+    return (
+        processor_out.video,
+        np.asarray(processor_out.landmarks),
+        processor_out.crop_data,
+    )
 
 
 def sample(
@@ -1104,27 +1122,18 @@ def sample(
     h, w = video.shape[2:]
     original_len = video.shape[0]
 
-    # The models operate on a square face crop. Preserve every non-square
-    # source automatically so a portrait/landscape input is not saved as a
-    # stretched 512x512 video. ``paste_back`` still selects this path for a
-    # source that is already square.
-    preserve_framing = paste_back or h != w
-    original_frames, crop_box, landmarks = None, None, None
-    if preserve_framing:
-        # Landmarks come first here: they define the crop box, and cropping to a
-        # square keeps the face in its true proportions instead of stretching a
-        # portrait frame into 512x512.
-        original_frames = video.clone()
-        landmarks = extract_video_landmarks(video, landmarks_model)
-        video, landmarks, crop_box = crop_face_region(video, landmarks)
-        mode = "Automatically preserving" if not paste_back else "Preserving"
-        print(
-            f"{mode} {w}x{h} output framing; cropped face box "
-            f"x[{crop_box.x_start}:{crop_box.x_end}] "
-            f"y[{crop_box.y_start}:{crop_box.y_end}]"
-        )
-    else:
-        video = torch.nn.functional.interpolate(video, (512, 512), mode="bilinear")
+    # Match training preprocessing exactly. Portrait/landscape sources are
+    # restored after generation; square sources retain the historical 512x512
+    # cropped output unless paste_back is explicitly requested.
+    restore_source_framing = paste_back or h != w
+    original_frames = video if restore_source_framing else None
+    video, landmarks, crop_boxes = preprocess_video_like_training(
+        video, landmarks_model, resize_size=512
+    )
+    print(
+        "Applied training crop: face scale=2, per-frame smoothing, "
+        f"model input={video.shape[3]}x{video.shape[2]}"
+    )
 
     with on_device(vae_model, device, offload=cpu_offload):
         video_emb = compute_video_embedding(video.permute(0, 2, 3, 1), vae_model)
@@ -1150,15 +1159,10 @@ def sample(
         audio, audio_interpolation, raw_audio = get_audio_embeddings(
             audio_path, 16000, hubert_model=hubert_model, wavlm_model=wavlm_model
         )
-    if landmarks is None:
-        landmarks = extract_video_landmarks(video, landmarks_model)
-
     video = (video / 255.0) * 2.0 - 1.0
 
-    # extract_video_landmarks() already ran on the 512x512 frames, so the
-    # coordinates are in that space. Rescaling them from the original (h, w)
-    # here would shift them a second time; it only happened to be a no-op for
-    # inputs that were already 512x512.
+    # VideoPreProcessor already returned landmarks in the training crop's
+    # 512x512 coordinate space, so no additional rescaling is needed here.
     landmarks = landmarks[:, :, :2]
     if len(landmarks) < len(audio):
         # Repeat last landmark
@@ -1177,6 +1181,9 @@ def sample(
             audio_interpolation = audio_interpolation[:max_frames]
             video_emb = video_emb[:max_frames] if video_emb is not None else None
             raw_audio = raw_audio[:max_frames] if raw_audio is not None else None
+            crop_boxes = crop_boxes[:max_frames]
+            if original_frames is not None:
+                original_frames = original_frames[:max_frames]
     if min_seconds is not None:
         min_frames = min_seconds * (fps_id + 1)
         video = video[min_frames:]
@@ -1185,6 +1192,9 @@ def sample(
         audio_interpolation = audio_interpolation[min_frames:]
         video_emb = video_emb[min_frames:] if video_emb is not None else None
         raw_audio = raw_audio[min_frames:] if raw_audio is not None else None
+        crop_boxes = crop_boxes[min_frames:]
+        if original_frames is not None:
+            original_frames = original_frames[min_frames:]
     audio = audio
 
     print(
@@ -1207,6 +1217,9 @@ def sample(
     audio_interpolation = audio_interpolation[:min_len]
     video_emb = video_emb[:min_len] if video_emb is not None else None
     raw_audio = raw_audio[:min_len] if raw_audio is not None else None
+    crop_boxes = crop_boxes[:min_len]
+    if original_frames is not None:
+        original_frames = original_frames[:min_len]
 
     h, w = video.shape[2:]
 
@@ -1456,9 +1469,9 @@ def sample(
         else:
             complete_video = np.concatenate([complete_video[:-1], vid], axis=0)
 
-    if preserve_framing:
-        complete_video = paste_faces_back(
-            complete_video, original_frames, crop_box
+    if restore_source_framing:
+        complete_video = paste_faces_back_per_frame(
+            complete_video, original_frames, crop_boxes
         )
 
     if raw_audio is not None:
@@ -1747,9 +1760,9 @@ def main(
             conditioner weights and runs them under autocast; the VAE stays in
             fp32, as the configs ask for.
         paste_back: Crop a square around the face, animate that, then paste the
-            result back into the original frames. Non-square videos use this
-            behavior automatically so their original resolution and aspect ratio
-            are always preserved; this option also enables it for square videos.
+            result back into the original-resolution frames. Non-square videos
+            are restored automatically; this option enables the same behavior
+            for square videos. Landmark detection always runs at 512 resolution.
     """
     print("Scale: ", scale)
     num_frames = default(num_frames, 14)
